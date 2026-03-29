@@ -1,0 +1,9 @@
+services:
+  postgres:
+    container_name: postllm-pg17-candle-e2e
+    environment:
+      POSTLLM_RUNTIME: candle
+      POSTLLM_MODEL: ${POSTLLM_CANDLE_GENERATION_MODEL:-Qwen/Qwen2.5-0.5B-Instruct}
+      POSTLLM_EMBEDDING_MODEL: ${POSTLLM_CANDLE_EMBEDDING_MODEL:-sentence-transformers/paraphrase-MiniLM-L3-v2}
+      POSTLLM_TIMEOUT_MS: ${POSTLLM_CANDLE_TIMEOUT_MS:-120000}
+      POSTLLM_CANDLE_CACHE_DIR: /tmp/postllm-candle-cache

@@ -1,0 +1,23 @@
+/target
+
+# PostgreSQL regression artifacts
+/tests/pg_regress/results/
+/tests/pg_regress/regression.diffs
+/tests/pg_regress/regression.out
+
+# Local environment and temporary files
+.DS_Store
+.env
+.env.local
+.envrc
+.direnv/
+*.log
+*.tmp
+*.orig
+*.rej
+*.swp
+*.swo
+
+# Editor settings
+.idea/
+.vscode/

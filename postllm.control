@@ -1,0 +1,6 @@
+comment = 'postllm: call OpenAI-compatible LLMs from PostgreSQL'
+default_version = '@CARGO_VERSION@'
+module_pathname = 'postllm'
+relocatable = false
+superuser = true
+trusted = false

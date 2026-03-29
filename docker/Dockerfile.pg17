@@ -1,0 +1,52 @@
+FROM postgres:17-bookworm AS builder
+
+ARG TARGETARCH
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CARGO_HOME=/usr/local/cargo
+ENV PGRX_HOME=/usr/local/pgrx
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV PATH=/usr/local/cargo/bin:${PATH}
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        clang \
+        curl \
+        libclang-dev \
+        llvm-dev \
+        pkg-config \
+        postgresql-server-dev-17 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --component clippy --component rustfmt
+
+RUN cargo install --locked cargo-pgrx --version 0.17.0
+
+RUN cargo pgrx init --pg17 /usr/lib/postgresql/17/bin/pg_config --no-run
+
+WORKDIR /workspace
+
+COPY Cargo.toml Cargo.lock README.md postllm.control ./
+COPY .cargo ./.cargo
+COPY src ./src
+COPY sql ./sql
+COPY tests ./tests
+
+RUN if [ "${TARGETARCH}" = "arm64" ]; then \
+        export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+fp16"; \
+    fi \
+    && cargo pgrx install \
+        --release \
+        --pg-config /usr/lib/postgresql/17/bin/pg_config \
+        --no-default-features \
+        --features pg17
+
+FROM postgres:17-bookworm
+
+COPY --from=builder /usr/lib/postgresql/17/lib/postllm.so /usr/lib/postgresql/17/lib/postllm.so
+COPY --from=builder /usr/share/postgresql/17/extension/postllm.control /usr/share/postgresql/17/extension/postllm.control
+COPY --from=builder /usr/share/postgresql/17/extension/postllm--0.1.0.sql /usr/share/postgresql/17/extension/postllm--0.1.0.sql
+COPY docker/initdb/010-postllm.sh /docker-entrypoint-initdb.d/010-postllm.sh

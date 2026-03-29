@@ -1,0 +1,21 @@
+services:
+  postgres:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.pg17
+    container_name: postllm-pg17
+    environment:
+      POSTGRES_DB: postllm
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTLLM_RUNTIME: ${POSTLLM_RUNTIME:-openai}
+      POSTLLM_BASE_URL: ${POSTLLM_BASE_URL:-http://host.docker.internal:11434/v1/chat/completions}
+      POSTLLM_MODEL: ${POSTLLM_MODEL:-llama3.2}
+      POSTLLM_EMBEDDING_MODEL: ${POSTLLM_EMBEDDING_MODEL:-sentence-transformers/paraphrase-MiniLM-L3-v2}
+      POSTLLM_API_KEY: ${POSTLLM_API_KEY:-}
+      POSTLLM_TIMEOUT_MS: ${POSTLLM_TIMEOUT_MS:-30000}
+      POSTLLM_CANDLE_CACHE_DIR: ${POSTLLM_CANDLE_CACHE_DIR:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${POSTLLM_PG_PORT:-5440}:5432"

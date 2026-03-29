@@ -1,0 +1,36 @@
+services:
+  llama:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: postllm-llama-e2e
+    command:
+      - --hf-repo
+      - ${POSTLLM_LLAMA_HF_REPO:-Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q2_K}
+      - --alias
+      - ${POSTLLM_LLAMA_MODEL_ALIAS:-qwen2.5-0.5b-instruct-q2_k}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --ctx-size
+      - "2048"
+      - --predict
+      - "128"
+      - --parallel
+      - "1"
+      - --jinja
+    ports:
+      - "18080:8080"
+    volumes:
+      - llama-cache:/root/.cache
+
+  postgres:
+    container_name: postllm-pg17-llama-e2e
+    depends_on:
+      - llama
+    environment:
+      POSTLLM_RUNTIME: openai
+      POSTLLM_BASE_URL: http://llama:8080/v1/chat/completions
+      POSTLLM_MODEL: ${POSTLLM_LLAMA_MODEL_ALIAS:-qwen2.5-0.5b-instruct-q2_k}
+
+volumes:
+  llama-cache:
