@@ -83,6 +83,8 @@ cargo install --locked cargo-pgrx
 cargo pgrx init --pg17 download
 ```
 
+Build with `--features candle-cuda` or `--features candle-metal` when you want optional local GPU execution for the Candle runtime. Without those crate features, `postllm` falls back to CPU execution only.
+
 On macOS with Homebrew ICU, `PostgreSQL` 17 may need:
 
 ```bash
@@ -116,6 +118,7 @@ The extension exposes `PostgreSQL` settings that work naturally with `SET`, `ALT
 - `postllm.retry_backoff_ms`
 - `postllm.candle_cache_dir`
 - `postllm.candle_offline`
+- `postllm.candle_device`
 - `postllm.candle_max_input_tokens`
 - `postllm.candle_max_concurrency`
 
@@ -131,6 +134,7 @@ SELECT postllm.configure(
     retry_backoff_ms => 250,
     runtime => 'openai',
     candle_offline => false,
+    candle_device => 'auto',
     candle_max_input_tokens => 0,
     candle_max_concurrency => 0
 );
@@ -167,6 +171,8 @@ User-facing errors now aim to be corrective. Argument-validation failures name t
 Hosted HTTP requests now retry transient failures by default on the `openai` runtime. The retry knobs are `postllm.max_retries` and `postllm.retry_backoff_ms`; the default policy retries transport/read failures plus upstream `408`, `409`, `425`, `429`, `500`, `502`, `503`, and `504`, with exponential backoff starting at `250ms`.
 
 `postllm.timeout_ms` now bounds both hosted HTTP requests and local Candle inference work. `PostgreSQL` query cancellation is also checked during hosted HTTP waits and local Candle inference loops, so cancelled statements can break out of in-flight requests and local generation work instead of waiting for the full timeout or token budget.
+
+For local Candle device selection, `postllm.candle_device` accepts `auto`, `cpu`, `cuda`, or `metal`. `auto` prefers an available accelerated device for the current build and falls back to CPU otherwise. Explicit `cuda` or `metal` selection fails fast if that accelerator is unavailable or the extension was not built with the matching `candle-cuda` or `candle-metal` feature.
 
 For local Candle safety controls, `postllm.candle_max_input_tokens` caps tokenized local inputs when set above `0`, and `postllm.candle_max_concurrency` caps the number of concurrent local Candle requests across backends when set above `0`. Leave either at `0` to disable that specific cap.
 
@@ -448,7 +454,7 @@ For local Candle model operations, use `postllm.model_install(...)`, `postllm.mo
 
 Set `postllm.candle_offline = on` or call `postllm.configure(candle_offline => true)` when you want Candle to use only already-cached local artifacts. In offline mode, missing files fail fast with a cache-miss error instead of falling back to Hugging Face downloads.
 
-`postllm.model_inspect(...)` now includes an `integrity` summary plus per-file integrity metadata. When a cached artifact is backed by a checksum-named Hugging Face blob, Candle verifies the cached bytes against that checksum and reports `verified`, `partial`, `unchecked`, or `mismatch` status. `postllm.model_install(...)` also refuses to leave a mismatched repo cache behind: if integrity validation fails after install, the local repo cache is evicted and the install call errors.
+`postllm.model_inspect(...)` now includes an `integrity` summary plus per-file integrity metadata. It also reports the requested and resolved Candle device for the current build and host, so you can tell whether `auto` chose CPU, CUDA, or Metal. When a cached artifact is backed by a checksum-named Hugging Face blob, Candle verifies the cached bytes against that checksum and reports `verified`, `partial`, `unchecked`, or `mismatch` status. `postllm.model_install(...)` also refuses to leave a mismatched repo cache behind: if integrity validation fails after install, the local repo cache is evicted and the install call errors.
 
 Known local metadata fast-paths currently include:
 
@@ -467,12 +473,12 @@ SELECT postllm.model_install(lane => 'generation');
 
 SELECT postllm.model_prewarm(lane => 'generation');
 
-SELECT postllm.configure(candle_offline => true);
+SELECT postllm.configure(candle_device => 'auto', candle_offline => true);
 
 SELECT postllm.model_evict(lane => 'generation', scope => 'memory');
 ```
 
-Use `lane => 'embedding'` to target the local embedding model explicitly, `lane => 'generation'` to target the local starter-generation model explicitly, or omit `lane` to let `postllm` choose. Turn on `candle_offline` after `model_install(...)` when you want cached-only local execution.
+Use `lane => 'embedding'` to target the local embedding model explicitly, `lane => 'generation'` to target the local starter-generation model explicitly, or omit `lane` to let `postllm` choose. Turn on `candle_offline` after `model_install(...)` when you want cached-only local execution. Set `candle_device => 'cpu'` when you need deterministic CPU-only behavior even on a GPU-capable build.
 
 ### Chunking Example
 

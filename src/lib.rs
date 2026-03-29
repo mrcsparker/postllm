@@ -70,6 +70,7 @@ mod postllm {
         runtime: default!(Option<&str>, "NULL"),
         candle_cache_dir: default!(Option<&str>, "NULL"),
         candle_offline: default!(Option<bool>, "NULL"),
+        candle_device: default!(Option<&str>, "NULL"),
         candle_max_input_tokens: default!(Option<i32>, "NULL"),
         candle_max_concurrency: default!(Option<i32>, "NULL"),
     ) -> JsonB {
@@ -84,6 +85,7 @@ mod postllm {
             runtime,
             candle_cache_dir,
             candle_offline,
+            candle_device,
             candle_max_input_tokens,
             candle_max_concurrency,
         ))
@@ -1622,12 +1624,14 @@ fn model_install_impl(model: Option<&str>, lane: Option<&str>) -> Result<Value> 
     let target = resolve_local_model_target(model, lane)?;
     let candle_cache_dir = guc::resolve_candle_cache_dir();
     let candle_offline = guc::resolve_candle_offline();
+    let candle_device = guc::resolve_candle_device()?;
 
     candle::install_model(
         &target.model,
         target.lane,
         candle_cache_dir.as_deref(),
         candle_offline,
+        candle_device,
     )
 }
 
@@ -1635,12 +1639,14 @@ fn model_prewarm_impl(model: Option<&str>, lane: Option<&str>) -> Result<Value> 
     let target = resolve_local_model_target(model, lane)?;
     let candle_cache_dir = guc::resolve_candle_cache_dir();
     let candle_offline = guc::resolve_candle_offline();
+    let candle_device = guc::resolve_candle_device()?;
 
     candle::prewarm_model(
         &target.model,
         target.lane,
         candle_cache_dir.as_deref(),
         candle_offline,
+        candle_device,
     )
 }
 
@@ -1648,12 +1654,14 @@ fn model_inspect_impl(model: Option<&str>, lane: Option<&str>) -> Result<Value> 
     let target = resolve_local_model_target(model, lane)?;
     let candle_cache_dir = guc::resolve_candle_cache_dir();
     let candle_offline = guc::resolve_candle_offline();
+    let candle_device = guc::resolve_candle_device()?;
 
     candle::inspect_model(
         &target.model,
         target.lane,
         candle_cache_dir.as_deref(),
         candle_offline,
+        candle_device,
     )
 }
 
@@ -1662,6 +1670,7 @@ fn model_evict_impl(model: Option<&str>, lane: Option<&str>, scope: &str) -> Res
     let scope = parse_local_model_evict_scope(scope)?;
     let candle_cache_dir = guc::resolve_candle_cache_dir();
     let candle_offline = guc::resolve_candle_offline();
+    let candle_device = guc::resolve_candle_device()?;
 
     candle::evict_model(
         &target.model,
@@ -1669,6 +1678,7 @@ fn model_evict_impl(model: Option<&str>, lane: Option<&str>, scope: &str) -> Res
         scope,
         candle_cache_dir.as_deref(),
         candle_offline,
+        candle_device,
     )
 }
 
@@ -5170,13 +5180,14 @@ mod tests {
             .as_deref()
             .map_or_else(|| "NULL".to_owned(), sql_literal);
         let configured = sql_json(&format!(
-            "SELECT postllm.configure(runtime => 'candle', model => {}, candle_cache_dir => {}, candle_offline => false, candle_max_input_tokens => 0, candle_max_concurrency => 0)",
+            "SELECT postllm.configure(runtime => 'candle', model => {}, candle_cache_dir => {}, candle_offline => false, candle_device => 'cpu', candle_max_input_tokens => 0, candle_max_concurrency => 0)",
             sql_literal(&model),
             cache_dir_sql,
         ));
 
         assert_eq!(configured["runtime"], "candle");
         assert_eq!(configured["model"].as_str(), Some(model.as_str()));
+        assert_eq!(configured["candle_device"], "cpu");
 
         if let Some(cache_dir) = cache_dir.as_deref() {
             assert_eq!(configured["candle_cache_dir"].as_str(), Some(cache_dir));
@@ -5207,6 +5218,7 @@ mod tests {
                 "has_api_key": false,
                 "candle_cache_dir": null,
                 "candle_offline": false,
+                "candle_device": "auto",
                 "candle_max_input_tokens": 0,
                 "candle_max_concurrency": 0,
                 "capabilities": {
@@ -5345,12 +5357,13 @@ mod tests {
     fn sql_model_inspect_should_default_to_embedding_model() {
         let cache_dir = fresh_test_cache_dir("model-inspect-embedding");
         let configured = sql_json(&format!(
-            "SELECT postllm.configure(runtime => 'openai', candle_cache_dir => {})",
+            "SELECT postllm.configure(runtime => 'openai', candle_cache_dir => {}, candle_device => 'cpu')",
             sql_literal(&cache_dir)
         ));
         let inspection = sql_json("SELECT postllm.model_inspect()");
 
         assert_eq!(configured["runtime"], "openai");
+        assert_eq!(configured["candle_device"], "cpu");
         assert_eq!(
             configured["candle_cache_dir"].as_str(),
             Some(cache_dir.as_str())
@@ -5361,6 +5374,8 @@ mod tests {
             "sentence-transformers/paraphrase-MiniLM-L3-v2"
         );
         assert_eq!(inspection["lane"], "embedding");
+        assert_eq!(inspection["device"]["requested"], "cpu");
+        assert_eq!(inspection["device"]["resolved"], "cpu");
         assert_eq!(inspection["cache_dir"].as_str(), Some(cache_dir.as_str()));
         assert_eq!(inspection["disk_cached"], false);
         assert_eq!(inspection["memory_cached"], false);
@@ -5378,16 +5393,19 @@ mod tests {
     fn sql_model_inspect_should_default_to_generation_model() {
         let cache_dir = fresh_test_cache_dir("model-inspect-generation");
         let configured = sql_json(&format!(
-            "SELECT postllm.configure(runtime => 'candle', model => 'Qwen/Qwen2.5-0.5B-Instruct', candle_cache_dir => {})",
+            "SELECT postllm.configure(runtime => 'candle', model => 'Qwen/Qwen2.5-0.5B-Instruct', candle_cache_dir => {}, candle_device => 'cpu')",
             sql_literal(&cache_dir)
         ));
         let inspection = sql_json("SELECT postllm.model_inspect()");
 
         assert_eq!(configured["runtime"], "candle");
+        assert_eq!(configured["candle_device"], "cpu");
         assert_eq!(inspection["runtime"], "candle");
         assert_eq!(inspection["model"], "Qwen/Qwen2.5-0.5B-Instruct");
         assert_eq!(inspection["lane"], "generation");
         assert_eq!(inspection["offline"], false);
+        assert_eq!(inspection["device"]["requested"], "cpu");
+        assert_eq!(inspection["device"]["resolved"], "cpu");
         assert_eq!(inspection["cache_dir"].as_str(), Some(cache_dir.as_str()));
         assert_eq!(inspection["disk_cached"], false);
         assert_eq!(inspection["memory_cached"], false);
@@ -5404,17 +5422,20 @@ mod tests {
     fn sql_model_evict_should_report_noop_for_empty_generation_cache() {
         let cache_dir = fresh_test_cache_dir("model-evict-generation");
         let configured = sql_json(&format!(
-            "SELECT postllm.configure(runtime => 'candle', model => 'Qwen/Qwen2.5-0.5B-Instruct', candle_cache_dir => {})",
+            "SELECT postllm.configure(runtime => 'candle', model => 'Qwen/Qwen2.5-0.5B-Instruct', candle_cache_dir => {}, candle_device => 'cpu')",
             sql_literal(&cache_dir)
         ));
         let eviction = sql_json("SELECT postllm.model_evict(scope => 'all')");
 
         assert_eq!(configured["runtime"], "candle");
+        assert_eq!(configured["candle_device"], "cpu");
         assert_eq!(eviction["runtime"], "candle");
         assert_eq!(eviction["action"], "evict");
         assert_eq!(eviction["model"], "Qwen/Qwen2.5-0.5B-Instruct");
         assert_eq!(eviction["lane"], "generation");
         assert_eq!(eviction["offline"], false);
+        assert_eq!(eviction["device"]["requested"], "cpu");
+        assert_eq!(eviction["device"]["resolved"], "cpu");
         assert_eq!(eviction["scope"], "all");
         assert_eq!(eviction["memory_evicted"], false);
         assert_eq!(eviction["disk_evicted"], false);
@@ -5441,6 +5462,8 @@ mod tests {
         assert_eq!(installed["action"], "install");
         assert_eq!(installed["model"].as_str(), Some(model.as_str()));
         assert_eq!(installed["lane"], "generation");
+        assert_eq!(installed["device"]["requested"], "cpu");
+        assert_eq!(installed["device"]["resolved"], "cpu");
         assert_eq!(installed["disk_cached"], true);
         assert_eq!(installed["integrity"]["ok"], true);
         assert_eq!(installed["integrity"]["status"], "verified");
@@ -5466,6 +5489,8 @@ mod tests {
         assert_eq!(prewarmed["action"], "prewarm");
         assert_eq!(prewarmed["model"].as_str(), Some(model.as_str()));
         assert_eq!(prewarmed["lane"], "generation");
+        assert_eq!(prewarmed["device"]["requested"], "cpu");
+        assert_eq!(prewarmed["device"]["resolved"], "cpu");
         assert_eq!(prewarmed["memory_cached"], true);
         assert_eq!(prewarmed["disk_cached"], true);
         assert_eq!(prewarmed["integrity"]["ok"], true);
@@ -6169,7 +6194,7 @@ mod tests {
     #[pg_test]
     fn sql_configure_should_update_the_current_session() {
         let configured = sql_json(
-            "SELECT postllm.configure(model => 'pg-test-model', embedding_model => 'sentence-transformers/all-MiniLM-L6-v2', timeout_ms => 5000, max_retries => 4, retry_backoff_ms => 750, candle_offline => true, candle_max_input_tokens => 2048, candle_max_concurrency => 2)",
+            "SELECT postllm.configure(model => 'pg-test-model', embedding_model => 'sentence-transformers/all-MiniLM-L6-v2', timeout_ms => 5000, max_retries => 4, retry_backoff_ms => 750, candle_offline => true, candle_device => 'cpu', candle_max_input_tokens => 2048, candle_max_concurrency => 2)",
         );
 
         assert_eq!(configured["model"], "pg-test-model");
@@ -6181,6 +6206,7 @@ mod tests {
         assert_eq!(configured["max_retries"], 4);
         assert_eq!(configured["retry_backoff_ms"], 750);
         assert_eq!(configured["candle_offline"], true);
+        assert_eq!(configured["candle_device"], "cpu");
         assert_eq!(configured["candle_max_input_tokens"], 2_048);
         assert_eq!(configured["candle_max_concurrency"], 2);
     }
@@ -6188,12 +6214,13 @@ mod tests {
     #[pg_test]
     fn sql_configure_should_accept_runtime_metadata() {
         let configured = sql_json(
-            "SELECT postllm.configure(runtime => 'candle', candle_cache_dir => '/tmp/postllm-candle', candle_offline => true, candle_max_input_tokens => 1024, candle_max_concurrency => 3)",
+            "SELECT postllm.configure(runtime => 'candle', candle_cache_dir => '/tmp/postllm-candle', candle_offline => true, candle_device => 'cpu', candle_max_input_tokens => 1024, candle_max_concurrency => 3)",
         );
 
         assert_eq!(configured["runtime"], "candle");
         assert_eq!(configured["candle_cache_dir"], "/tmp/postllm-candle");
         assert_eq!(configured["candle_offline"], true);
+        assert_eq!(configured["candle_device"], "cpu");
         assert_eq!(configured["candle_max_input_tokens"], 1_024);
         assert_eq!(configured["candle_max_concurrency"], 3);
     }
@@ -6661,6 +6688,16 @@ mod tests {
     fn sql_configure_should_reject_negative_candle_max_concurrency() {
         drop(Spi::get_one::<JsonB>(
             "SELECT postllm.configure(candle_max_concurrency => -1)",
+        ));
+    }
+
+    #[pg_test]
+    #[should_panic(
+        expected = "postllm received an invalid argument: argument 'candle_device' must be one of 'auto', 'cpu', 'cuda', or 'metal', got 'tpu'; fix: pass candle_device => 'auto', 'cpu', 'cuda', or 'metal'"
+    )]
+    fn sql_configure_should_reject_unknown_candle_device() {
+        drop(Spi::get_one::<JsonB>(
+            "SELECT postllm.configure(candle_device => 'tpu')",
         ));
     }
 

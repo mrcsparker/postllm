@@ -49,6 +49,50 @@ impl Runtime {
     }
 }
 
+/// Preferred execution device for local Candle requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CandleDevice {
+    /// Prefer an available local accelerator and fall back to CPU when none are usable.
+    Auto,
+    /// Force CPU execution.
+    Cpu,
+    /// Force CUDA execution on device 0.
+    Cuda,
+    /// Force Metal execution on device 0.
+    Metal,
+}
+
+impl CandleDevice {
+    pub(crate) const AUTO: &'static str = "auto";
+    pub(crate) const CPU: &'static str = "cpu";
+    pub(crate) const CUDA: &'static str = "cuda";
+    pub(crate) const METAL: &'static str = "metal";
+    pub(crate) const ACCEPTED_VALUES: &'static str = "'auto', 'cpu', 'cuda', or 'metal'";
+
+    /// Returns the canonical configuration string for this device preference.
+    #[must_use]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => Self::AUTO,
+            Self::Cpu => Self::CPU,
+            Self::Cuda => Self::CUDA,
+            Self::Metal => Self::METAL,
+        }
+    }
+
+    /// Parses a user-supplied Candle device preference.
+    #[must_use]
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            Self::AUTO => Some(Self::Auto),
+            Self::CPU => Some(Self::Cpu),
+            Self::CUDA => Some(Self::Cuda),
+            Self::METAL => Some(Self::Metal),
+            _ => None,
+        }
+    }
+}
+
 /// Resolved runtime settings for one request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Settings {
@@ -70,6 +114,8 @@ pub(crate) struct Settings {
     pub(crate) candle_cache_dir: Option<String>,
     /// Whether Candle should refuse all network fetches and use cached artifacts only.
     pub(crate) candle_offline: bool,
+    /// Preferred execution device for local Candle requests.
+    pub(crate) candle_device: CandleDevice,
     /// Optional operator-enforced cap on local Candle tokenized input size per request value.
     pub(crate) candle_max_input_tokens: u32,
     /// Optional operator-enforced cap on concurrent local Candle requests across backends.
@@ -901,8 +947,9 @@ fn content_text(content: &Value) -> Option<String> {
 )]
 mod tests {
     use super::{
-        CapabilitySnapshot, Feature, RequestOptions, Runtime, Settings, choice, finish_reason,
-        normalize_response_metadata, normalize_stream_event, stream_text_delta, usage,
+        CandleDevice, CapabilitySnapshot, Feature, RequestOptions, Runtime, Settings, choice,
+        finish_reason, normalize_response_metadata, normalize_stream_event, stream_text_delta,
+        usage,
     };
     use serde_json::json;
 
@@ -917,6 +964,7 @@ mod tests {
             retry_backoff_ms: 250,
             candle_cache_dir: None,
             candle_offline: false,
+            candle_device: CandleDevice::Auto,
             candle_max_input_tokens: 0,
             candle_max_concurrency: 0,
         }
@@ -982,6 +1030,7 @@ mod tests {
                 retry_backoff_ms: 250,
                 candle_cache_dir: None,
                 candle_offline: false,
+                candle_device: CandleDevice::Auto,
                 candle_max_input_tokens: 0,
                 candle_max_concurrency: 0,
             },
@@ -1078,6 +1127,7 @@ mod tests {
                 retry_backoff_ms: 250,
                 candle_cache_dir: None,
                 candle_offline: false,
+                candle_device: CandleDevice::Auto,
                 candle_max_input_tokens: 0,
                 candle_max_concurrency: 0,
             },

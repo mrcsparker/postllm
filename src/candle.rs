@@ -3,7 +3,7 @@
     reason = "this module exposes crate-private APIs across sibling modules"
 )]
 
-use crate::backend::{Feature, RequestOptions, RerankResult, Settings};
+use crate::backend::{CandleDevice, Feature, RequestOptions, RerankResult, Settings};
 use crate::error::{Error, Result};
 use candle_core::safetensors::BufferedSafetensors;
 use candle_core::{DType, Device, Error as CandleCoreError, Shape, Tensor};
@@ -562,6 +562,7 @@ impl GenerationAvailability {
 struct ModelCacheKey {
     model_id: String,
     cache_dir: Option<String>,
+    device_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -628,6 +629,223 @@ impl LocalModelIntegritySummary {
             "partial"
         } else {
             "unchecked"
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolvedCandleDeviceKind {
+    Cpu,
+    Cuda,
+    Metal,
+}
+
+impl ResolvedCandleDeviceKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Cuda => "cuda",
+            Self::Metal => "metal",
+        }
+    }
+
+    const fn accelerated(self) -> bool {
+        !matches!(self, Self::Cpu)
+    }
+
+    const fn ordinal(self) -> Option<usize> {
+        if self.accelerated() { Some(0) } else { None }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedCandleDevice {
+    kind: ResolvedCandleDeviceKind,
+    device: Device,
+}
+
+impl ResolvedCandleDevice {
+    const fn cache_key(&self) -> &'static str {
+        self.kind.as_str()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CandleDeviceProbe {
+    requested: CandleDevice,
+    resolved: Option<ResolvedCandleDeviceKind>,
+    reason: Option<String>,
+}
+
+impl CandleDeviceProbe {
+    fn cache_key(&self) -> Option<&'static str> {
+        self.resolved.map(ResolvedCandleDeviceKind::as_str)
+    }
+
+    fn snapshot(&self) -> Value {
+        json!({
+            "requested": self.requested.as_str(),
+            "resolved": self.resolved.map(ResolvedCandleDeviceKind::as_str),
+            "available": self.resolved.is_some(),
+            "accelerated": self.resolved.is_some_and(ResolvedCandleDeviceKind::accelerated),
+            "ordinal": self.resolved.and_then(ResolvedCandleDeviceKind::ordinal),
+            "reason": self.reason,
+        })
+    }
+}
+
+fn probe_candle_device(preference: CandleDevice) -> CandleDeviceProbe {
+    match preference {
+        CandleDevice::Auto => {
+            let mut reasons = Vec::new();
+
+            for candidate in auto_accelerator_candidates() {
+                match try_accelerator_device(candidate) {
+                    Ok(_) => {
+                        return CandleDeviceProbe {
+                            requested: preference,
+                            resolved: Some(candidate),
+                            reason: None,
+                        };
+                    }
+                    Err(reason) => reasons.push(format!("{}: {reason}", candidate.as_str())),
+                }
+            }
+
+            CandleDeviceProbe {
+                requested: preference,
+                resolved: Some(ResolvedCandleDeviceKind::Cpu),
+                reason: (!reasons.is_empty()).then(|| {
+                    format!(
+                        "no local GPU backend was available; using CPU ({})",
+                        reasons.join("; ")
+                    )
+                }),
+            }
+        }
+        CandleDevice::Cpu => CandleDeviceProbe {
+            requested: preference,
+            resolved: Some(ResolvedCandleDeviceKind::Cpu),
+            reason: None,
+        },
+        CandleDevice::Cuda => {
+            explicit_candle_device_probe(preference, ResolvedCandleDeviceKind::Cuda)
+        }
+        CandleDevice::Metal => {
+            explicit_candle_device_probe(preference, ResolvedCandleDeviceKind::Metal)
+        }
+    }
+}
+
+fn explicit_candle_device_probe(
+    requested: CandleDevice,
+    kind: ResolvedCandleDeviceKind,
+) -> CandleDeviceProbe {
+    match try_accelerator_device(kind) {
+        Ok(_) => CandleDeviceProbe {
+            requested,
+            resolved: Some(kind),
+            reason: None,
+        },
+        Err(reason) => CandleDeviceProbe {
+            requested,
+            resolved: None,
+            reason: Some(reason),
+        },
+    }
+}
+
+fn resolve_runtime_device(preference: CandleDevice) -> Result<ResolvedCandleDevice> {
+    match preference {
+        CandleDevice::Auto => {
+            for candidate in auto_accelerator_candidates() {
+                if let Ok(device) = try_accelerator_device(candidate) {
+                    return Ok(ResolvedCandleDevice {
+                        kind: candidate,
+                        device,
+                    });
+                }
+            }
+
+            Ok(ResolvedCandleDevice {
+                kind: ResolvedCandleDeviceKind::Cpu,
+                device: Device::Cpu,
+            })
+        }
+        CandleDevice::Cpu => Ok(ResolvedCandleDevice {
+            kind: ResolvedCandleDeviceKind::Cpu,
+            device: Device::Cpu,
+        }),
+        CandleDevice::Cuda => {
+            resolve_explicit_runtime_device(CandleDevice::Cuda, ResolvedCandleDeviceKind::Cuda)
+        }
+        CandleDevice::Metal => {
+            resolve_explicit_runtime_device(CandleDevice::Metal, ResolvedCandleDeviceKind::Metal)
+        }
+    }
+}
+
+fn resolve_explicit_runtime_device(
+    requested: CandleDevice,
+    kind: ResolvedCandleDeviceKind,
+) -> Result<ResolvedCandleDevice> {
+    try_accelerator_device(kind)
+        .map(|device| ResolvedCandleDevice { kind, device })
+        .map_err(|reason| {
+            Error::Unsupported(format!(
+                "local Candle device '{}' is unavailable: {reason}; set postllm.candle_device = 'cpu' or 'auto' to fall back to CPU",
+                requested.as_str(),
+            ))
+        })
+}
+
+const fn auto_accelerator_candidates() -> [ResolvedCandleDeviceKind; 2] {
+    if cfg!(target_os = "macos") {
+        [
+            ResolvedCandleDeviceKind::Metal,
+            ResolvedCandleDeviceKind::Cuda,
+        ]
+    } else {
+        [
+            ResolvedCandleDeviceKind::Cuda,
+            ResolvedCandleDeviceKind::Metal,
+        ]
+    }
+}
+
+fn try_accelerator_device(kind: ResolvedCandleDeviceKind) -> core::result::Result<Device, String> {
+    match kind {
+        ResolvedCandleDeviceKind::Cpu => Ok(Device::Cpu),
+        ResolvedCandleDeviceKind::Cuda => {
+            Device::new_cuda(0).map_err(|error| candle_device_unavailable_reason(kind, error))
+        }
+        ResolvedCandleDeviceKind::Metal => {
+            Device::new_metal(0).map_err(|error| candle_device_unavailable_reason(kind, error))
+        }
+    }
+}
+
+fn candle_device_unavailable_reason(
+    kind: ResolvedCandleDeviceKind,
+    error: CandleCoreError,
+) -> String {
+    match (kind, error) {
+        (
+            ResolvedCandleDeviceKind::Cuda,
+            CandleCoreError::NotCompiledWithCudaSupport,
+        ) => "CUDA support is not compiled into this build; rebuild postllm with --features candle-cuda to enable it".to_owned(),
+        (
+            ResolvedCandleDeviceKind::Metal,
+            CandleCoreError::NotCompiledWithMetalSupport,
+        ) => "Metal support is not compiled into this build; rebuild postllm with --features candle-metal to enable it".to_owned(),
+        (ResolvedCandleDeviceKind::Cuda, error) => {
+            format!("failed to open CUDA device 0: {error}")
+        }
+        (ResolvedCandleDeviceKind::Metal, error) => {
+            format!("failed to open Metal device 0: {error}")
+        }
+        (ResolvedCandleDeviceKind::Cpu, error) => {
+            format!("failed to open the CPU device: {error}")
         }
     }
 }
@@ -800,10 +1018,11 @@ impl LocalModelCacheState {
     }
 }
 
-fn local_cache_key(model_id: &str, cache_dir: Option<&str>) -> ModelCacheKey {
+fn local_cache_key(model_id: &str, cache_dir: Option<&str>, device_key: &str) -> ModelCacheKey {
     ModelCacheKey {
         model_id: model_id.to_owned(),
         cache_dir: cache_dir.map(str::to_owned),
+        device_key: device_key.to_owned(),
     }
 }
 
@@ -914,7 +1133,12 @@ struct EmbeddingRuntime {
 }
 
 impl EmbeddingRuntime {
-    fn load(model_id: &str, cache_dir: Option<&str>, offline: bool) -> Result<Self> {
+    fn load(
+        model_id: &str,
+        cache_dir: Option<&str>,
+        offline: bool,
+        resolved_device: ResolvedCandleDevice,
+    ) -> Result<Self> {
         local_runtime_checkpoint("embedding runtime startup")?;
         let api = build_api(cache_dir)?;
         let repo = api.model(model_id.to_owned());
@@ -948,7 +1172,7 @@ impl EmbeddingRuntime {
         )?;
         let tokenizer = Tokenizer::from_file(tokenizer_path)
             .map_err(|error| Error::ModelAssets(error.to_string()))?;
-        let device = Device::Cpu;
+        let device = resolved_device.device;
         let vb = buffered_safetensor_var_builder(&weight_paths, BERT_DTYPE, &device)?;
         let model = load_embedding_model(&vb, &raw_config, &config_json, layout.architecture)?;
         let projection = layout
@@ -1040,6 +1264,7 @@ impl GenerationRuntime {
         model_id: &str,
         cache_dir: Option<&str>,
         offline: bool,
+        resolved_device: ResolvedCandleDevice,
     ) -> Result<Self> {
         local_runtime_checkpoint("generation runtime startup")?;
         let api = build_api(cache_dir)?;
@@ -1071,7 +1296,7 @@ impl GenerationRuntime {
         )?;
         let stop_token_ids =
             resolve_generation_stop_tokens(&tokenizer, &config_json, generation_config.as_ref())?;
-        let device = Device::Cpu;
+        let device = resolved_device.device;
         let top_p = generation_config
             .as_ref()
             .and_then(GenerationConfigFile::top_p);
@@ -1348,6 +1573,7 @@ impl PreparedGenerationRuntime {
             spec,
             cache_dir: settings.candle_cache_dir.clone(),
             offline: settings.candle_offline,
+            device_preference: settings.candle_device,
         }))
     }
 
@@ -1362,6 +1588,7 @@ struct StarterGenerationRuntime {
     spec: &'static GenerationModelSpec,
     cache_dir: Option<String>,
     offline: bool,
+    device_preference: CandleDevice,
 }
 
 impl StarterGenerationRuntime {
@@ -1370,6 +1597,7 @@ impl StarterGenerationRuntime {
             self.spec,
             self.cache_dir.as_deref(),
             self.offline,
+            self.device_preference,
             |runtime| runtime.chat_response(self.spec.model_id, self.spec, messages, options),
         )
     }
@@ -1493,6 +1721,7 @@ pub(crate) fn embed(
             &settings.model,
             settings.candle_cache_dir.as_deref(),
             settings.candle_offline,
+            settings.candle_device,
             |runtime| {
                 inputs
                     .iter()
@@ -1515,6 +1744,7 @@ pub(crate) fn rerank(
             &settings.model,
             settings.candle_cache_dir.as_deref(),
             settings.candle_offline,
+            settings.candle_device,
             |runtime| {
                 let query_embedding = runtime.embed("query", query, true)?;
                 let document_embeddings = documents
@@ -1569,12 +1799,13 @@ pub(crate) fn install_model(
     lane: LocalModelLane,
     cache_dir: Option<&str>,
     offline: bool,
+    device_preference: CandleDevice,
 ) -> Result<Value> {
     let downloaded_files = match lane {
         LocalModelLane::Embedding => install_embedding_assets(model_id, cache_dir, offline)?,
         LocalModelLane::Generation => install_generation_assets(model_id, cache_dir, offline)?,
     };
-    let mut inspection = inspect_model(model_id, lane, cache_dir, offline)?;
+    let mut inspection = inspect_model(model_id, lane, cache_dir, offline, device_preference)?;
     reject_invalid_cache_integrity(model_id, cache_dir, &inspection)?;
 
     if let Some(inspection_object) = inspection.as_object_mut() {
@@ -1598,20 +1829,29 @@ pub(crate) fn prewarm_model(
     lane: LocalModelLane,
     cache_dir: Option<&str>,
     offline: bool,
+    device_preference: CandleDevice,
 ) -> Result<Value> {
     match lane {
         LocalModelLane::Embedding => {
-            with_embedding_runtime(model_id, cache_dir, offline, |_runtime| Ok::<(), Error>(()))?;
+            with_embedding_runtime(
+                model_id,
+                cache_dir,
+                offline,
+                device_preference,
+                |_runtime| Ok::<(), Error>(()),
+            )?;
         }
         LocalModelLane::Generation => {
             let spec = generation_model_spec(model_id).ok_or_else(|| {
                 Error::Unsupported(unsupported_generation_model_message(model_id, cache_dir))
             })?;
-            with_generation_runtime(spec, cache_dir, offline, |_runtime| Ok::<(), Error>(()))?;
+            with_generation_runtime(spec, cache_dir, offline, device_preference, |_runtime| {
+                Ok::<(), Error>(())
+            })?;
         }
     }
 
-    let mut inspection = inspect_model(model_id, lane, cache_dir, offline)?;
+    let mut inspection = inspect_model(model_id, lane, cache_dir, offline, device_preference)?;
     if let Some(inspection_object) = inspection.as_object_mut() {
         inspection_object.insert("action".to_owned(), json!("prewarm"));
     }
@@ -1624,6 +1864,7 @@ pub(crate) fn inspect_model(
     lane: LocalModelLane,
     cache_dir: Option<&str>,
     offline: bool,
+    device_preference: CandleDevice,
 ) -> Result<Value> {
     let cache = build_cache(cache_dir);
     let repo = Repo::model(model_id.to_owned());
@@ -1640,12 +1881,14 @@ pub(crate) fn inspect_model(
         LocalModelLane::Generation => Some(generation_model_snapshot(model_id, cache_dir)),
     };
     let integrity = cache_state.integrity;
+    let device = probe_candle_device(device_preference);
 
     Ok(json!({
         "runtime": "candle",
         "model": model_id,
         "lane": lane.as_str(),
         "offline": offline,
+        "device": device.snapshot(),
         "cache_dir": cache_dir_value,
         "repo_cache_path": repo_root_value,
         "revision": cache_state.revision,
@@ -1653,7 +1896,7 @@ pub(crate) fn inspect_model(
         "commit_hash": cache_state.commit_hash,
         "snapshot_path": snapshot_path_value,
         "disk_cached": cache_state.disk_cached(),
-        "memory_cached": local_model_is_loaded(model_id, lane, cache_dir),
+        "memory_cached": local_model_is_loaded(model_id, lane, cache_dir, device.cache_key()),
         "cached_file_count": cache_state.cached_files.len(),
         "cached_bytes": cache_state.cached_bytes,
         "integrity": {
@@ -1719,10 +1962,12 @@ pub(crate) fn evict_model(
     scope: LocalModelEvictionScope,
     cache_dir: Option<&str>,
     offline: bool,
+    device_preference: CandleDevice,
 ) -> Result<Value> {
+    let device = probe_candle_device(device_preference);
     let memory_evicted = match scope {
         LocalModelEvictionScope::Memory | LocalModelEvictionScope::All => {
-            evict_memory_model(model_id, lane, cache_dir)
+            evict_memory_model(model_id, lane, cache_dir, device.cache_key())
         }
         LocalModelEvictionScope::Disk => false,
     };
@@ -1757,13 +2002,14 @@ pub(crate) fn evict_model(
         "model": model_id,
         "lane": lane.as_str(),
         "offline": offline,
+        "device": device.snapshot(),
         "scope": scope.as_str(),
         "memory_evicted": memory_evicted,
         "disk_evicted": disk_evicted,
         "removed_bytes": removed_bytes,
         "removed_files": removed_files,
         "repo_cache_path": repo_root.display().to_string(),
-        "memory_cached": local_model_is_loaded(model_id, lane, cache_dir),
+        "memory_cached": local_model_is_loaded(model_id, lane, cache_dir, device.cache_key()),
         "disk_cached": repo_root.exists(),
     }))
 }
@@ -1818,15 +2064,22 @@ fn with_embedding_runtime<T>(
     model_id: &str,
     cache_dir: Option<&str>,
     offline: bool,
+    device_preference: CandleDevice,
     f: impl FnOnce(&EmbeddingRuntime) -> Result<T>,
 ) -> Result<T> {
-    let key = local_cache_key(model_id, cache_dir);
+    let resolved_device = resolve_runtime_device(device_preference)?;
+    let key = local_cache_key(model_id, cache_dir, resolved_device.cache_key());
     let runtime = EMBEDDING_MODELS.with(|cache| -> Result<Rc<EmbeddingRuntime>> {
         if let Some(runtime) = cache.borrow().get(&key).cloned() {
             return Ok(runtime);
         }
 
-        let runtime = Rc::new(EmbeddingRuntime::load(model_id, cache_dir, offline)?);
+        let runtime = Rc::new(EmbeddingRuntime::load(
+            model_id,
+            cache_dir,
+            offline,
+            resolved_device.clone(),
+        )?);
         cache.borrow_mut().insert(key, Rc::clone(&runtime));
 
         Ok(runtime)
@@ -1839,9 +2092,11 @@ fn with_generation_runtime<T>(
     spec: &GenerationModelSpec,
     cache_dir: Option<&str>,
     offline: bool,
+    device_preference: CandleDevice,
     f: impl FnOnce(&mut GenerationRuntime) -> Result<T>,
 ) -> Result<T> {
-    let key = local_cache_key(spec.model_id, cache_dir);
+    let resolved_device = resolve_runtime_device(device_preference)?;
+    let key = local_cache_key(spec.model_id, cache_dir, resolved_device.cache_key());
     let runtime = GENERATION_MODELS.with(|cache| -> Result<Rc<RefCell<GenerationRuntime>>> {
         if let Some(runtime) = cache.borrow().get(&key).cloned() {
             return Ok(runtime);
@@ -1852,6 +2107,7 @@ fn with_generation_runtime<T>(
             spec.model_id,
             cache_dir,
             offline,
+            resolved_device.clone(),
         )?));
         cache.borrow_mut().insert(key, Rc::clone(&runtime));
 
@@ -2434,8 +2690,16 @@ fn generation_model_snapshot(model_id: &str, _cache_dir: Option<&str>) -> Value 
     })
 }
 
-fn local_model_is_loaded(model_id: &str, lane: LocalModelLane, cache_dir: Option<&str>) -> bool {
-    let key = local_cache_key(model_id, cache_dir);
+fn local_model_is_loaded(
+    model_id: &str,
+    lane: LocalModelLane,
+    cache_dir: Option<&str>,
+    device_key: Option<&str>,
+) -> bool {
+    let Some(device_key) = device_key else {
+        return false;
+    };
+    let key = local_cache_key(model_id, cache_dir, device_key);
 
     match lane {
         LocalModelLane::Embedding => {
@@ -2447,8 +2711,16 @@ fn local_model_is_loaded(model_id: &str, lane: LocalModelLane, cache_dir: Option
     }
 }
 
-fn evict_memory_model(model_id: &str, lane: LocalModelLane, cache_dir: Option<&str>) -> bool {
-    let key = local_cache_key(model_id, cache_dir);
+fn evict_memory_model(
+    model_id: &str,
+    lane: LocalModelLane,
+    cache_dir: Option<&str>,
+    device_key: Option<&str>,
+) -> bool {
+    let Some(device_key) = device_key else {
+        return false;
+    };
+    let key = local_cache_key(model_id, cache_dir, device_key);
 
     match lane {
         LocalModelLane::Embedding => {
@@ -3199,10 +3471,10 @@ mod tests {
         SafetensorIndexFile, Sha1, Sha256, chat_response, cls_pool,
         enforce_local_input_token_limit, generation_availability, generation_model_spec,
         generation_runtime_dtype, inspect_cache_state, max_pool, mean_pool, mean_sqrt_len_pool,
-        normalize_l2, rank_embeddings, render_chatml_prompt, sharded_weight_filenames,
-        token_ids_from_value,
+        normalize_l2, probe_candle_device, rank_embeddings, render_chatml_prompt,
+        resolve_runtime_device, sharded_weight_filenames, token_ids_from_value,
     };
-    use crate::backend::{Feature, RequestOptions, Runtime, Settings};
+    use crate::backend::{CandleDevice, Feature, RequestOptions, Runtime, Settings};
     use candle_core::{DType, Device};
     use hf_hub::{Cache, Repo};
     use serde_json::json;
@@ -3805,6 +4077,64 @@ mod tests {
     }
 
     #[test]
+    fn resolve_runtime_device_should_return_cpu_for_cpu_preference() {
+        let resolved = resolve_runtime_device(CandleDevice::Cpu)
+            .expect("cpu device preference should always resolve");
+
+        assert_eq!(resolved.cache_key(), "cpu");
+        assert!(resolved.device.is_cpu());
+    }
+
+    #[test]
+    fn probe_candle_device_should_report_cpu_fallback_for_auto_without_gpu_support() {
+        if candle_core::utils::cuda_is_available() || candle_core::utils::metal_is_available() {
+            return;
+        }
+
+        let snapshot = probe_candle_device(CandleDevice::Auto).snapshot();
+
+        assert_eq!(snapshot["requested"], "auto");
+        assert_eq!(snapshot["resolved"], "cpu");
+        assert_eq!(snapshot["available"], true);
+        assert_eq!(snapshot["accelerated"], false);
+        assert!(
+            snapshot["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("using CPU"))
+        );
+    }
+
+    #[test]
+    fn resolve_runtime_device_should_reject_explicit_cuda_without_cuda_support() {
+        if candle_core::utils::cuda_is_available() {
+            return;
+        }
+
+        let error = resolve_runtime_device(CandleDevice::Cuda)
+            .expect_err("explicit cuda preference should fail without cuda support");
+
+        assert_eq!(
+            error.to_string(),
+            "postllm backend is not available: local Candle device 'cuda' is unavailable: CUDA support is not compiled into this build; rebuild postllm with --features candle-cuda to enable it; set postllm.candle_device = 'cpu' or 'auto' to fall back to CPU"
+        );
+    }
+
+    #[test]
+    fn resolve_runtime_device_should_reject_explicit_metal_without_metal_support() {
+        if candle_core::utils::metal_is_available() {
+            return;
+        }
+
+        let error = resolve_runtime_device(CandleDevice::Metal)
+            .expect_err("explicit metal preference should fail without metal support");
+
+        assert_eq!(
+            error.to_string(),
+            "postllm backend is not available: local Candle device 'metal' is unavailable: Metal support is not compiled into this build; rebuild postllm with --features candle-metal to enable it; set postllm.candle_device = 'cpu' or 'auto' to fall back to CPU"
+        );
+    }
+
+    #[test]
     fn chat_response_should_reject_unknown_generation_models_before_runtime_work() {
         let error = chat_response(
             &Settings {
@@ -3817,6 +4147,7 @@ mod tests {
                 retry_backoff_ms: 250,
                 candle_cache_dir: None,
                 candle_offline: false,
+                candle_device: CandleDevice::Auto,
                 candle_max_input_tokens: 0,
                 candle_max_concurrency: 0,
             },

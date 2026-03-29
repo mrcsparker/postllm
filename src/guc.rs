@@ -3,7 +3,7 @@
     reason = "this module exposes crate-private APIs across sibling modules"
 )]
 
-use crate::backend::{Runtime, Settings};
+use crate::backend::{CandleDevice, Runtime, Settings};
 use crate::error::{Error, Result};
 use pgrx::datum::DatumWithOid;
 use pgrx::spi::Spi;
@@ -26,6 +26,8 @@ static POSTLLM_RETRY_BACKOFF_MS: GucSetting<i32> = GucSetting::<i32>::new(250);
 static POSTLLM_CANDLE_CACHE_DIR: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(None);
 static POSTLLM_CANDLE_OFFLINE: GucSetting<bool> = GucSetting::<bool>::new(false);
+static POSTLLM_CANDLE_DEVICE: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(Some(c"auto"));
 static POSTLLM_CANDLE_MAX_INPUT_TOKENS: GucSetting<i32> = GucSetting::<i32>::new(0);
 static POSTLLM_CANDLE_MAX_CONCURRENCY: GucSetting<i32> = GucSetting::<i32>::new(0);
 
@@ -128,6 +130,15 @@ fn register_candle_runtime_gucs() {
         GucFlags::default(),
     );
 
+    GucRegistry::define_string_guc(
+        c"postllm.candle_device",
+        c"Preferred execution device for local Candle requests.",
+        c"Supported values are 'auto' to prefer an available accelerator and fall back to CPU, 'cpu', 'cuda', and 'metal'. CUDA and Metal require builds that enable the optional candle-cuda or candle-metal crate feature.",
+        &POSTLLM_CANDLE_DEVICE,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
     GucRegistry::define_int_guc(
         c"postllm.candle_max_input_tokens",
         c"Optional cap on local Candle tokenized input size.",
@@ -208,6 +219,7 @@ pub(crate) fn resolve(model_override: Option<&str>) -> Result<Settings> {
             "SET postllm.candle_max_concurrency = 0 to disable the cap or another non-negative integer",
         )
     })?;
+    let candle_device = resolve_candle_device()?;
 
     let runtime_value = required_setting("postllm.runtime", string_setting(&POSTLLM_RUNTIME))?;
     let runtime = Runtime::parse(&runtime_value).map_err(|_| {
@@ -237,6 +249,7 @@ pub(crate) fn resolve(model_override: Option<&str>) -> Result<Settings> {
         retry_backoff_ms,
         candle_cache_dir: string_setting(&POSTLLM_CANDLE_CACHE_DIR),
         candle_offline: POSTLLM_CANDLE_OFFLINE.get(),
+        candle_device,
         candle_max_input_tokens,
         candle_max_concurrency,
     })
@@ -290,6 +303,7 @@ pub(crate) fn resolve_rerank(model_override: Option<&str>) -> Result<Settings> {
             "SET postllm.candle_max_concurrency = 0 to disable the cap or another non-negative integer",
         )
     })?;
+    let candle_device = resolve_candle_device()?;
 
     let runtime_value = required_setting("postllm.runtime", string_setting(&POSTLLM_RUNTIME))?;
     let runtime = Runtime::parse(&runtime_value).map_err(|_| {
@@ -322,6 +336,7 @@ pub(crate) fn resolve_rerank(model_override: Option<&str>) -> Result<Settings> {
         retry_backoff_ms,
         candle_cache_dir: string_setting(&POSTLLM_CANDLE_CACHE_DIR),
         candle_offline: POSTLLM_CANDLE_OFFLINE.get(),
+        candle_device,
         candle_max_input_tokens,
         candle_max_concurrency,
     })
@@ -373,6 +388,7 @@ pub(crate) fn resolve_embedding_settings(model_override: Option<&str>) -> Result
             "SET postllm.candle_max_concurrency = 0 to disable the cap or another non-negative integer",
         )
     })?;
+    let candle_device = resolve_candle_device()?;
 
     Ok(Settings {
         runtime: Runtime::Candle,
@@ -384,6 +400,7 @@ pub(crate) fn resolve_embedding_settings(model_override: Option<&str>) -> Result
         retry_backoff_ms,
         candle_cache_dir: string_setting(&POSTLLM_CANDLE_CACHE_DIR),
         candle_offline: POSTLLM_CANDLE_OFFLINE.get(),
+        candle_device,
         candle_max_input_tokens,
         candle_max_concurrency,
     })
@@ -414,6 +431,26 @@ pub(crate) fn resolve_candle_offline() -> bool {
     POSTLLM_CANDLE_OFFLINE.get()
 }
 
+/// Resolves the configured local Candle device preference.
+pub(crate) fn resolve_candle_device() -> Result<CandleDevice> {
+    let value = required_setting(
+        "postllm.candle_device",
+        string_setting(&POSTLLM_CANDLE_DEVICE),
+    )?;
+    let normalized = value.trim().to_ascii_lowercase();
+
+    CandleDevice::parse(&normalized).ok_or_else(|| {
+        Error::invalid_setting(
+            "postllm.candle_device",
+            format!(
+                "must be one of {}, got '{normalized}'",
+                CandleDevice::ACCEPTED_VALUES,
+            ),
+            "SET postllm.candle_device = 'auto', 'cpu', 'cuda', or 'metal'",
+        )
+    })
+}
+
 /// Returns a JSON snapshot of the current backend-visible settings.
 pub(crate) fn snapshot() -> Value {
     json!({
@@ -427,6 +464,7 @@ pub(crate) fn snapshot() -> Value {
         "has_api_key": string_setting(&POSTLLM_API_KEY).is_some(),
         "candle_cache_dir": string_setting(&POSTLLM_CANDLE_CACHE_DIR),
         "candle_offline": POSTLLM_CANDLE_OFFLINE.get(),
+        "candle_device": string_setting(&POSTLLM_CANDLE_DEVICE),
         "candle_max_input_tokens": POSTLLM_CANDLE_MAX_INPUT_TOKENS.get(),
         "candle_max_concurrency": POSTLLM_CANDLE_MAX_CONCURRENCY.get(),
         "capabilities": capabilities_snapshot(),
@@ -460,6 +498,7 @@ pub(crate) fn configure_session(
     runtime: Option<&str>,
     candle_cache_dir: Option<&str>,
     candle_offline: Option<bool>,
+    candle_device: Option<&str>,
     candle_max_input_tokens: Option<i32>,
     candle_max_concurrency: Option<i32>,
 ) -> Result<Value> {
@@ -535,6 +574,10 @@ pub(crate) fn configure_session(
         )?;
     }
 
+    if let Some(candle_device) = candle_device {
+        set_candle_device_session(candle_device)?;
+    }
+
     if let Some(candle_max_input_tokens) = candle_max_input_tokens {
         if candle_max_input_tokens < 0 {
             return Err(Error::invalid_argument(
@@ -575,6 +618,22 @@ fn set_session_string(name: &str, value: &str) -> Result<()> {
     )?);
 
     Ok(())
+}
+
+fn set_candle_device_session(candle_device: &str) -> Result<()> {
+    let candle_device = require_non_blank("candle_device", candle_device)?;
+    let normalized = candle_device.trim().to_ascii_lowercase();
+    let candle_device = CandleDevice::parse(&normalized).ok_or_else(|| {
+        Error::invalid_argument(
+            "candle_device",
+            format!(
+                "must be one of {}, got '{normalized}'",
+                CandleDevice::ACCEPTED_VALUES,
+            ),
+            "pass candle_device => 'auto', 'cpu', 'cuda', or 'metal'",
+        )
+    })?;
+    set_session_string("postllm.candle_device", candle_device.as_str())
 }
 
 fn string_setting(setting: &'static GucSetting<Option<CString>>) -> Option<String> {

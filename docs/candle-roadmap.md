@@ -31,6 +31,8 @@ Hosted HTTP retries are now configurable on the `openai` runtime through `postll
 
 Local Candle runtime controls now include `postllm.candle_max_input_tokens` for tokenized input-size caps and `postllm.candle_max_concurrency` for cross-backend local inference throttling.
 
+Optional local GPU selection is now available through `postllm.candle_device`, with `auto`, `cpu`, `cuda`, and `metal` modes. CUDA and Metal require building `postllm` with the matching `candle-cuda` or `candle-metal` crate feature, while `auto` falls back to CPU when no accelerator is available.
+
 Reranking is now available through `postllm.rerank(...)`. On the Candle runtime it reuses the active local embedding model and scores candidates by local similarity. On the `openai` runtime it forwards a hosted rerank request to `postllm.base_url` and normalizes the returned ranked rows.
 
 ## Why Candle
@@ -73,11 +75,12 @@ Phase 3: runtime capabilities
 
 Phase 4: artifact management
 
-- Status: local lifecycle helpers, offline mode, and checksum-aware cache validation are now live.
+- Status: local lifecycle helpers, offline mode, checksum-aware cache validation, and optional device-aware GPU selection are now live.
 - `postllm.model_install(...)`, `postllm.model_prewarm(...)`, `postllm.model_inspect(...)`, and `postllm.model_evict(...)` now manage local Candle embedding and starter-generation models from SQL.
-- The lifecycle helpers now report disk-cache state, current-backend memory-cache state, cached file inventories, lane-aware metadata, and integrity summaries for both embeddings and generation.
+- The lifecycle helpers now report disk-cache state, current-backend memory-cache state, cached file inventories, lane-aware metadata, integrity summaries, and resolved device metadata for both embeddings and generation.
 - `postllm.candle_offline` now forces Candle to use already-cached artifacts only, so local embedding, rerank, lifecycle, and starter-generation calls fail fast on cache misses instead of downloading from Hugging Face.
 - Cached files now verify against checksum-named Hugging Face blobs when possible, and `postllm.model_install(...)` evicts the repo cache if integrity validation fails.
+- `postllm.candle_device` now supports `auto`, `cpu`, `cuda`, and `metal`, with device-aware memory caching so CPU and accelerated runtimes do not collide inside one backend process.
 - Use a configurable local cache directory for weights and tokenizers.
 - Decide whether model loading is per-backend process, per-session, or shared global state.
 

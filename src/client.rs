@@ -697,7 +697,7 @@ mod tests {
         chat_response, chat_stream_response, extract_text, parse_rerank_response,
         parse_sse_json_events, rerank_response,
     };
-    use crate::backend::{RequestOptions, RerankResult, Runtime, Settings};
+    use crate::backend::{CandleDevice, RequestOptions, RerankResult, Runtime, Settings};
     use reqwest::StatusCode;
     use serde_json::{Value, json};
     use std::io::{BufRead, BufReader, Cursor, Read, Write};
@@ -737,6 +737,7 @@ mod tests {
             retry_backoff_ms,
             candle_cache_dir: None,
             candle_offline: false,
+            candle_device: CandleDevice::Auto,
             candle_max_input_tokens: 0,
             candle_max_concurrency: 0,
         }
