@@ -8,8 +8,19 @@ use crate::error::{Error, Result};
 use pgrx::datum::DatumWithOid;
 use pgrx::spi::Spi;
 use pgrx::{GucContext, GucFlags, GucRegistry, GucSetting};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::ffi::CString;
+
+pub(crate) const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434/v1/chat/completions";
+pub(crate) const DEFAULT_RUNTIME: &str = Runtime::OPENAI;
+pub(crate) const DEFAULT_MODEL: &str = "llama3.2";
+pub(crate) const DEFAULT_EMBEDDING_MODEL: &str = "sentence-transformers/paraphrase-MiniLM-L3-v2";
+pub(crate) const DEFAULT_TIMEOUT_MS: i32 = 30_000;
+pub(crate) const DEFAULT_MAX_RETRIES: i32 = 2;
+pub(crate) const DEFAULT_RETRY_BACKOFF_MS: i32 = 250;
+pub(crate) const DEFAULT_CANDLE_DEVICE: &str = CandleDevice::AUTO;
+pub(crate) const DEFAULT_CANDLE_MAX_INPUT_TOKENS: i32 = 0;
+pub(crate) const DEFAULT_CANDLE_MAX_CONCURRENCY: i32 = 0;
 
 static POSTLLM_BASE_URL: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(c"http://127.0.0.1:11434/v1/chat/completions"));
@@ -30,6 +41,149 @@ static POSTLLM_CANDLE_DEVICE: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(c"auto"));
 static POSTLLM_CANDLE_MAX_INPUT_TOKENS: GucSetting<i32> = GucSetting::<i32>::new(0);
 static POSTLLM_CANDLE_MAX_CONCURRENCY: GucSetting<i32> = GucSetting::<i32>::new(0);
+
+/// Validated session-local `postllm` overrides.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SessionOverrides {
+    pub(crate) base_url: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) embedding_model: Option<String>,
+    pub(crate) api_key: Option<String>,
+    pub(crate) timeout_ms: Option<i32>,
+    pub(crate) max_retries: Option<i32>,
+    pub(crate) retry_backoff_ms: Option<i32>,
+    pub(crate) runtime: Option<String>,
+    pub(crate) candle_cache_dir: Option<String>,
+    pub(crate) candle_offline: Option<bool>,
+    pub(crate) candle_device: Option<String>,
+    pub(crate) candle_max_input_tokens: Option<i32>,
+    pub(crate) candle_max_concurrency: Option<i32>,
+}
+
+impl SessionOverrides {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the SQL configure(...) entry point intentionally maps one-to-one onto setting overrides"
+    )]
+    pub(crate) fn from_configure_args(
+        base_url: Option<&str>,
+        model: Option<&str>,
+        embedding_model: Option<&str>,
+        api_key: Option<&str>,
+        timeout_ms: Option<i32>,
+        max_retries: Option<i32>,
+        retry_backoff_ms: Option<i32>,
+        runtime: Option<&str>,
+        candle_cache_dir: Option<&str>,
+        candle_offline: Option<bool>,
+        candle_device: Option<&str>,
+        candle_max_input_tokens: Option<i32>,
+        candle_max_concurrency: Option<i32>,
+    ) -> Result<Self> {
+        Ok(Self {
+            base_url: sanitize_non_blank_string("base_url", base_url)?,
+            model: sanitize_non_blank_string("model", model)?,
+            embedding_model: sanitize_non_blank_string("embedding_model", embedding_model)?,
+            api_key: api_key.map(|value| value.trim().to_owned()),
+            timeout_ms: sanitize_positive_int(
+                "timeout_ms",
+                timeout_ms,
+                "pass a positive integer number of milliseconds",
+            )?,
+            max_retries: sanitize_non_negative_int(
+                "max_retries",
+                max_retries,
+                "pass zero to disable retries or a positive retry count",
+            )?,
+            retry_backoff_ms: sanitize_non_negative_int(
+                "retry_backoff_ms",
+                retry_backoff_ms,
+                "pass zero to retry immediately or a positive integer number of milliseconds",
+            )?,
+            runtime: sanitize_runtime(runtime)?,
+            candle_cache_dir: candle_cache_dir.map(|value| value.trim().to_owned()),
+            candle_offline,
+            candle_device: sanitize_candle_device(candle_device)?,
+            candle_max_input_tokens: sanitize_non_negative_int(
+                "candle_max_input_tokens",
+                candle_max_input_tokens,
+                "pass zero to disable the local Candle token cap or a positive integer token limit",
+            )?,
+            candle_max_concurrency: sanitize_non_negative_int(
+                "candle_max_concurrency",
+                candle_max_concurrency,
+                "pass zero to disable the local Candle concurrency cap or a positive integer slot count",
+            )?,
+        })
+    }
+
+    pub(crate) fn from_profile_json(value: &Value) -> Result<Self> {
+        let object = value.as_object().ok_or_else(|| {
+            Error::Config(
+                "stored profile config must be a JSON object; fix: rewrite it with postllm.profile_set(...)"
+                    .to_owned(),
+            )
+        })?;
+        validate_profile_keys(object)?;
+
+        Ok(Self {
+            base_url: parse_profile_string(object, "base_url", true)?,
+            model: parse_profile_string(object, "model", true)?,
+            embedding_model: parse_profile_string(object, "embedding_model", true)?,
+            api_key: None,
+            timeout_ms: parse_profile_int(object, "timeout_ms", false)?,
+            max_retries: parse_profile_int(object, "max_retries", true)?,
+            retry_backoff_ms: parse_profile_int(object, "retry_backoff_ms", true)?,
+            runtime: parse_profile_runtime(object)?,
+            candle_cache_dir: parse_profile_string(object, "candle_cache_dir", false)?,
+            candle_offline: parse_profile_bool(object, "candle_offline")?,
+            candle_device: parse_profile_candle_device(object)?,
+            candle_max_input_tokens: parse_profile_int(object, "candle_max_input_tokens", true)?,
+            candle_max_concurrency: parse_profile_int(object, "candle_max_concurrency", true)?,
+        })
+    }
+
+    #[must_use]
+    pub(crate) fn profile_is_empty(&self) -> bool {
+        self.to_profile_json().as_object().is_none_or(Map::is_empty)
+    }
+
+    #[must_use]
+    pub(crate) fn to_profile_json(&self) -> Value {
+        let mut object = Map::new();
+
+        insert_optional_string(&mut object, "base_url", self.base_url.as_deref());
+        insert_optional_string(&mut object, "model", self.model.as_deref());
+        insert_optional_string(
+            &mut object,
+            "embedding_model",
+            self.embedding_model.as_deref(),
+        );
+        insert_optional_i32(&mut object, "timeout_ms", self.timeout_ms);
+        insert_optional_i32(&mut object, "max_retries", self.max_retries);
+        insert_optional_i32(&mut object, "retry_backoff_ms", self.retry_backoff_ms);
+        insert_optional_string(&mut object, "runtime", self.runtime.as_deref());
+        insert_optional_string(
+            &mut object,
+            "candle_cache_dir",
+            self.candle_cache_dir.as_deref(),
+        );
+        insert_optional_bool(&mut object, "candle_offline", self.candle_offline);
+        insert_optional_string(&mut object, "candle_device", self.candle_device.as_deref());
+        insert_optional_i32(
+            &mut object,
+            "candle_max_input_tokens",
+            self.candle_max_input_tokens,
+        );
+        insert_optional_i32(
+            &mut object,
+            "candle_max_concurrency",
+            self.candle_max_concurrency,
+        );
+
+        Value::Object(object)
+    }
+}
 
 /// Registers all `PostgreSQL` GUCs used by the extension.
 pub(crate) fn register() {
@@ -234,10 +388,7 @@ pub(crate) fn resolve(model_override: Option<&str>) -> Result<Settings> {
             "SET postllm.runtime = 'openai' or 'candle'",
         )
     })?;
-    let model = match model_override.and_then(trimmed_or_none) {
-        Some(model) => model.to_owned(),
-        None => required_setting("postllm.model", string_setting(&POSTLLM_MODEL))?,
-    };
+    let model = resolve_generation_model(model_override)?;
 
     Ok(Settings {
         runtime,
@@ -320,8 +471,8 @@ pub(crate) fn resolve_rerank(model_override: Option<&str>) -> Result<Settings> {
     })?;
     let model = match runtime {
         Runtime::OpenAi => match model_override.and_then(trimmed_or_none) {
-            Some(model) => model.to_owned(),
-            None => required_setting("postllm.model", string_setting(&POSTLLM_MODEL))?,
+            Some(model) => resolve_generation_alias(model)?,
+            None => resolve_generation_model(None)?,
         },
         Runtime::Candle => resolve_embedding_model(model_override)?,
     };
@@ -408,7 +559,7 @@ pub(crate) fn resolve_embedding_settings(model_override: Option<&str>) -> Result
 
 /// Resolves the current Candle embedding model, optionally overriding it for one request.
 pub(crate) fn resolve_embedding_model(model_override: Option<&str>) -> Result<String> {
-    model_override.and_then(trimmed_or_none).map_or_else(
+    let model = model_override.and_then(trimmed_or_none).map_or_else(
         || {
             required_setting(
                 "postllm.embedding_model",
@@ -416,7 +567,9 @@ pub(crate) fn resolve_embedding_model(model_override: Option<&str>) -> Result<St
             )
         },
         |model| Ok(model.to_owned()),
-    )
+    )?;
+
+    resolve_embedding_alias(&model)
 }
 
 /// Resolves the optional Candle cache directory.
@@ -474,10 +627,15 @@ pub(crate) fn snapshot() -> Value {
 /// Returns a JSON capability snapshot based on the current GUC state.
 #[must_use]
 pub(crate) fn capabilities_snapshot() -> Value {
+    let model = string_setting(&POSTLLM_MODEL)
+        .map(|model| resolve_generation_alias(&model).unwrap_or(model));
+    let embedding_model = string_setting(&POSTLLM_EMBEDDING_MODEL)
+        .map(|model| resolve_embedding_alias(&model).unwrap_or(model));
+
     crate::backend::CapabilitySnapshot::from_raw(
         string_setting(&POSTLLM_RUNTIME),
-        string_setting(&POSTLLM_MODEL),
-        string_setting(&POSTLLM_EMBEDDING_MODEL),
+        model,
+        embedding_model,
     )
     .snapshot()
 }
@@ -502,106 +660,92 @@ pub(crate) fn configure_session(
     candle_max_input_tokens: Option<i32>,
     candle_max_concurrency: Option<i32>,
 ) -> Result<Value> {
-    if let Some(base_url) = base_url {
-        set_session_string("postllm.base_url", require_non_blank("base_url", base_url)?)?;
+    let overrides = SessionOverrides::from_configure_args(
+        base_url,
+        model,
+        embedding_model,
+        api_key,
+        timeout_ms,
+        max_retries,
+        retry_backoff_ms,
+        runtime,
+        candle_cache_dir,
+        candle_offline,
+        candle_device,
+        candle_max_input_tokens,
+        candle_max_concurrency,
+    )?;
+
+    apply_session_overrides(&overrides)
+}
+
+/// Applies validated session-local overrides and returns the resulting settings snapshot.
+pub(crate) fn apply_session_overrides(overrides: &SessionOverrides) -> Result<Value> {
+    apply_session_overrides_internal(overrides)
+}
+
+/// Resets non-secret settings to their extension defaults, then applies the provided profile.
+pub(crate) fn apply_profile_overrides(overrides: &SessionOverrides) -> Result<Value> {
+    reset_profile_managed_settings_to_defaults()?;
+    apply_session_overrides_internal(overrides)
+}
+
+fn apply_session_overrides_internal(overrides: &SessionOverrides) -> Result<Value> {
+    if let Some(base_url) = overrides.base_url.as_deref() {
+        set_session_string("postllm.base_url", base_url)?;
     }
 
-    if let Some(runtime) = runtime {
-        let runtime = require_non_blank("runtime", runtime)?;
-        let _ = Runtime::parse(runtime)?;
+    if let Some(runtime) = overrides.runtime.as_deref() {
         set_session_string("postllm.runtime", runtime)?;
     }
 
-    if let Some(model) = model {
-        set_session_string("postllm.model", require_non_blank("model", model)?)?;
+    if let Some(model) = overrides.model.as_deref() {
+        set_session_string("postllm.model", model)?;
     }
 
-    if let Some(embedding_model) = embedding_model {
-        set_session_string(
-            "postllm.embedding_model",
-            require_non_blank("embedding_model", embedding_model)?,
-        )?;
+    if let Some(embedding_model) = overrides.embedding_model.as_deref() {
+        set_session_string("postllm.embedding_model", embedding_model)?;
     }
 
-    if let Some(api_key) = api_key {
-        set_session_string("postllm.api_key", api_key.trim())?;
+    if let Some(api_key) = overrides.api_key.as_deref() {
+        set_session_string("postllm.api_key", api_key)?;
     }
 
-    if let Some(timeout_ms) = timeout_ms {
-        if timeout_ms <= 0 {
-            return Err(Error::invalid_argument(
-                "timeout_ms",
-                format!("must be greater than zero, got {timeout_ms}"),
-                "pass a positive integer number of milliseconds",
-            ));
-        }
-
+    if let Some(timeout_ms) = overrides.timeout_ms {
         set_session_string("postllm.timeout_ms", &timeout_ms.to_string())?;
     }
 
-    if let Some(max_retries) = max_retries {
-        if max_retries < 0 {
-            return Err(Error::invalid_argument(
-                "max_retries",
-                format!("must be greater than or equal to zero, got {max_retries}"),
-                "pass zero to disable retries or a positive retry count",
-            ));
-        }
-
+    if let Some(max_retries) = overrides.max_retries {
         set_session_string("postllm.max_retries", &max_retries.to_string())?;
     }
 
-    if let Some(retry_backoff_ms) = retry_backoff_ms {
-        if retry_backoff_ms < 0 {
-            return Err(Error::invalid_argument(
-                "retry_backoff_ms",
-                format!("must be greater than or equal to zero, got {retry_backoff_ms}"),
-                "pass zero to retry immediately or a positive integer number of milliseconds",
-            ));
-        }
-
+    if let Some(retry_backoff_ms) = overrides.retry_backoff_ms {
         set_session_string("postllm.retry_backoff_ms", &retry_backoff_ms.to_string())?;
     }
 
-    if let Some(candle_cache_dir) = candle_cache_dir {
-        set_session_string("postllm.candle_cache_dir", candle_cache_dir.trim())?;
+    if let Some(candle_cache_dir) = overrides.candle_cache_dir.as_deref() {
+        set_session_string("postllm.candle_cache_dir", candle_cache_dir)?;
     }
 
-    if let Some(candle_offline) = candle_offline {
+    if let Some(candle_offline) = overrides.candle_offline {
         set_session_string(
             "postllm.candle_offline",
             if candle_offline { "on" } else { "off" },
         )?;
     }
 
-    if let Some(candle_device) = candle_device {
-        set_candle_device_session(candle_device)?;
+    if let Some(candle_device) = overrides.candle_device.as_deref() {
+        set_session_string("postllm.candle_device", candle_device)?;
     }
 
-    if let Some(candle_max_input_tokens) = candle_max_input_tokens {
-        if candle_max_input_tokens < 0 {
-            return Err(Error::invalid_argument(
-                "candle_max_input_tokens",
-                format!("must be greater than or equal to zero, got {candle_max_input_tokens}"),
-                "pass zero to disable the local Candle token cap or a positive integer token limit",
-            ));
-        }
-
+    if let Some(candle_max_input_tokens) = overrides.candle_max_input_tokens {
         set_session_string(
             "postllm.candle_max_input_tokens",
             &candle_max_input_tokens.to_string(),
         )?;
     }
 
-    if let Some(candle_max_concurrency) = candle_max_concurrency {
-        if candle_max_concurrency < 0 {
-            return Err(Error::invalid_argument(
-                "candle_max_concurrency",
-                format!("must be greater than or equal to zero, got {candle_max_concurrency}"),
-                "pass zero to disable the local Candle concurrency cap or a positive integer slot count",
-            ));
-        }
-
+    if let Some(candle_max_concurrency) = overrides.candle_max_concurrency {
         set_session_string(
             "postllm.candle_max_concurrency",
             &candle_max_concurrency.to_string(),
@@ -609,6 +753,31 @@ pub(crate) fn configure_session(
     }
 
     Ok(snapshot())
+}
+
+fn reset_profile_managed_settings_to_defaults() -> Result<()> {
+    set_session_string("postllm.base_url", DEFAULT_BASE_URL)?;
+    set_session_string("postllm.runtime", DEFAULT_RUNTIME)?;
+    set_session_string("postllm.model", DEFAULT_MODEL)?;
+    set_session_string("postllm.embedding_model", DEFAULT_EMBEDDING_MODEL)?;
+    set_session_string("postllm.timeout_ms", &DEFAULT_TIMEOUT_MS.to_string())?;
+    set_session_string("postllm.max_retries", &DEFAULT_MAX_RETRIES.to_string())?;
+    set_session_string(
+        "postllm.retry_backoff_ms",
+        &DEFAULT_RETRY_BACKOFF_MS.to_string(),
+    )?;
+    set_session_string("postllm.candle_cache_dir", "")?;
+    set_session_string("postllm.candle_offline", "off")?;
+    set_session_string("postllm.candle_device", DEFAULT_CANDLE_DEVICE)?;
+    set_session_string(
+        "postllm.candle_max_input_tokens",
+        &DEFAULT_CANDLE_MAX_INPUT_TOKENS.to_string(),
+    )?;
+    set_session_string(
+        "postllm.candle_max_concurrency",
+        &DEFAULT_CANDLE_MAX_CONCURRENCY.to_string(),
+    )?;
+    Ok(())
 }
 
 fn set_session_string(name: &str, value: &str) -> Result<()> {
@@ -620,20 +789,212 @@ fn set_session_string(name: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn set_candle_device_session(candle_device: &str) -> Result<()> {
-    let candle_device = require_non_blank("candle_device", candle_device)?;
-    let normalized = candle_device.trim().to_ascii_lowercase();
-    let candle_device = CandleDevice::parse(&normalized).ok_or_else(|| {
-        Error::invalid_argument(
-            "candle_device",
-            format!(
-                "must be one of {}, got '{normalized}'",
-                CandleDevice::ACCEPTED_VALUES,
-            ),
-            "pass candle_device => 'auto', 'cpu', 'cuda', or 'metal'",
-        )
-    })?;
-    set_session_string("postllm.candle_device", candle_device.as_str())
+fn resolve_generation_model(model_override: Option<&str>) -> Result<String> {
+    let model = model_override.and_then(trimmed_or_none).map_or_else(
+        || required_setting("postllm.model", string_setting(&POSTLLM_MODEL)),
+        |model| Ok(model.to_owned()),
+    )?;
+
+    resolve_generation_alias(&model)
+}
+
+fn resolve_generation_alias(model: &str) -> Result<String> {
+    crate::catalog::resolve_model_alias(model, crate::catalog::ModelAliasLane::Generation)
+        .map(|resolved| resolved.unwrap_or_else(|| model.to_owned()))
+}
+
+fn resolve_embedding_alias(model: &str) -> Result<String> {
+    crate::catalog::resolve_model_alias(model, crate::catalog::ModelAliasLane::Embedding)
+        .map(|resolved| resolved.unwrap_or_else(|| model.to_owned()))
+}
+
+fn sanitize_non_blank_string(name: &str, value: Option<&str>) -> Result<Option<String>> {
+    value
+        .map(|value| require_non_blank(name, value).map(str::to_owned))
+        .transpose()
+}
+
+fn sanitize_positive_int(name: &str, value: Option<i32>, fix: &str) -> Result<Option<i32>> {
+    value
+        .map(|value| {
+            if value <= 0 {
+                Err(Error::invalid_argument(
+                    name,
+                    format!("must be greater than zero, got {value}"),
+                    fix,
+                ))
+            } else {
+                Ok(value)
+            }
+        })
+        .transpose()
+}
+
+fn sanitize_non_negative_int(name: &str, value: Option<i32>, fix: &str) -> Result<Option<i32>> {
+    value
+        .map(|value| {
+            if value < 0 {
+                Err(Error::invalid_argument(
+                    name,
+                    format!("must be greater than or equal to zero, got {value}"),
+                    fix,
+                ))
+            } else {
+                Ok(value)
+            }
+        })
+        .transpose()
+}
+
+fn sanitize_runtime(value: Option<&str>) -> Result<Option<String>> {
+    value
+        .map(|runtime| {
+            let runtime = require_non_blank("runtime", runtime)?;
+            let parsed = Runtime::parse(runtime)?;
+            Ok(parsed.as_str().to_owned())
+        })
+        .transpose()
+}
+
+fn sanitize_candle_device(value: Option<&str>) -> Result<Option<String>> {
+    value
+        .map(|value| {
+            let normalized = require_non_blank("candle_device", value)?
+                .trim()
+                .to_ascii_lowercase();
+            CandleDevice::parse(&normalized)
+                .map(|device| device.as_str().to_owned())
+                .ok_or_else(|| {
+                    Error::invalid_argument(
+                        "candle_device",
+                        format!(
+                            "must be one of {}, got '{normalized}'",
+                            CandleDevice::ACCEPTED_VALUES,
+                        ),
+                        "pass candle_device => 'auto', 'cpu', 'cuda', or 'metal'",
+                    )
+                })
+        })
+        .transpose()
+}
+
+fn validate_profile_keys(object: &Map<String, Value>) -> Result<()> {
+    const ALLOWED_KEYS: [&str; 11] = [
+        "base_url",
+        "model",
+        "embedding_model",
+        "timeout_ms",
+        "max_retries",
+        "retry_backoff_ms",
+        "runtime",
+        "candle_cache_dir",
+        "candle_offline",
+        "candle_device",
+        "candle_max_input_tokens",
+    ];
+    const EXTRA_KEY: &str = "candle_max_concurrency";
+
+    for key in object.keys() {
+        if !ALLOWED_KEYS.contains(&key.as_str()) && key != EXTRA_KEY {
+            return Err(Error::Config(format!(
+                "stored profile config includes unsupported key '{key}'; fix: rewrite it with postllm.profile_set(...)"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_profile_string(
+    object: &Map<String, Value>,
+    key: &str,
+    require_non_blank_value: bool,
+) -> Result<Option<String>> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => {
+            if require_non_blank_value {
+                Ok(Some(require_non_blank(key, value)?.to_owned()))
+            } else {
+                Ok(Some(value.trim().to_owned()))
+            }
+        }
+        Some(_) => Err(Error::Config(format!(
+            "stored profile config field '{key}' must be a string or null; fix: rewrite it with postllm.profile_set(...)"
+        ))),
+    }
+}
+
+fn parse_profile_int(
+    object: &Map<String, Value>,
+    key: &str,
+    allow_zero: bool,
+) -> Result<Option<i32>> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(number)) => {
+            let value = number.as_i64().ok_or_else(|| {
+                Error::Config(format!(
+                    "stored profile config field '{key}' must be an integer or null; fix: rewrite it with postllm.profile_set(...)"
+                ))
+            })?;
+            let value = i32::try_from(value).map_err(|_| {
+                Error::Config(format!(
+                    "stored profile config field '{key}' must fit into a PostgreSQL integer; fix: rewrite it with postllm.profile_set(...)"
+                ))
+            })?;
+            if allow_zero {
+                sanitize_non_negative_int(key, Some(value), "rewrite the profile with a non-negative integer")?
+            } else {
+                sanitize_positive_int(key, Some(value), "rewrite the profile with a positive integer")?
+            }
+            .ok_or_else(|| {
+                Error::Config(format!(
+                    "stored profile config field '{key}' did not validate; fix: rewrite it with postllm.profile_set(...)"
+                ))
+            })
+            .map(Some)
+        }
+        Some(_) => Err(Error::Config(format!(
+            "stored profile config field '{key}' must be an integer or null; fix: rewrite it with postllm.profile_set(...)"
+        ))),
+    }
+}
+
+fn parse_profile_bool(object: &Map<String, Value>, key: &str) -> Result<Option<bool>> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(Error::Config(format!(
+            "stored profile config field '{key}' must be a boolean or null; fix: rewrite it with postllm.profile_set(...)"
+        ))),
+    }
+}
+
+fn parse_profile_runtime(object: &Map<String, Value>) -> Result<Option<String>> {
+    sanitize_runtime(parse_profile_string(object, "runtime", true)?.as_deref())
+}
+
+fn parse_profile_candle_device(object: &Map<String, Value>) -> Result<Option<String>> {
+    sanitize_candle_device(parse_profile_string(object, "candle_device", true)?.as_deref())
+}
+
+fn insert_optional_string(object: &mut Map<String, Value>, key: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        object.insert(key.to_owned(), Value::String(value.to_owned()));
+    }
+}
+
+fn insert_optional_i32(object: &mut Map<String, Value>, key: &str, value: Option<i32>) {
+    if let Some(value) = value {
+        object.insert(key.to_owned(), json!(value));
+    }
+}
+
+fn insert_optional_bool(object: &mut Map<String, Value>, key: &str, value: Option<bool>) {
+    if let Some(value) = value {
+        object.insert(key.to_owned(), json!(value));
+    }
 }
 
 fn string_setting(setting: &'static GucSetting<Option<CString>>) -> Option<String> {

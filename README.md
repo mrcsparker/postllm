@@ -7,6 +7,15 @@ The extension is built around a native schema-scoped API:
 - `postllm.settings() -> jsonb`
 - `postllm.capabilities() -> jsonb`
 - `postllm.configure(...) -> jsonb`
+- `postllm.profiles() -> jsonb`
+- `postllm.profile(name text) -> jsonb`
+- `postllm.profile_set(name text, ...) -> jsonb`
+- `postllm.profile_apply(name text) -> jsonb`
+- `postllm.profile_delete(name text) -> jsonb`
+- `postllm.model_aliases() -> jsonb`
+- `postllm.model_alias(alias text, lane text) -> jsonb`
+- `postllm.model_alias_set(alias text, lane text, model text, description text default null) -> jsonb`
+- `postllm.model_alias_delete(alias text, lane text) -> jsonb`
 - `postllm.message(role text, content text) -> jsonb`
 - `postllm.system(content text) -> jsonb`
 - `postllm.user(content text) -> jsonb`
@@ -138,6 +147,28 @@ SELECT postllm.configure(
     candle_max_input_tokens => 0,
     candle_max_concurrency => 0
 );
+```
+
+For reusable non-secret environments, `postllm.profile_set(...)` stores named configuration profiles in the database and `postllm.profile_apply(...)` reapplies them to the current session. Profile application resets managed non-secret settings back to extension defaults before applying the stored profile, so switching from a local Candle setup to a hosted setup does not leak stale runtime settings. Profiles intentionally do not store `postllm.api_key`.
+
+For reusable model shorthands, `postllm.model_alias_set(...)` stores lane-aware generation and embedding aliases. Once defined, aliases resolve automatically through `postllm.capabilities()`, `postllm.chat(...)`, `postllm.complete(...)`, `postllm.embed(...)`, `postllm.embedding_model_info(...)`, rerank helpers, and local model lifecycle commands.
+
+```sql
+SELECT postllm.profile_set(
+    name => 'hosted-staging',
+    runtime => 'openai',
+    base_url => 'http://127.0.0.1:4000/v1/chat/completions',
+    model => 'staging-chat'
+);
+
+SELECT postllm.model_alias_set(
+    alias => 'starter',
+    lane => 'generation',
+    model => 'Qwen/Qwen2.5-0.5B-Instruct'
+);
+
+SELECT postllm.profile_apply('hosted-staging');
+SELECT postllm.configure(runtime => 'candle', model => 'starter');
 ```
 
 Inspect the active runtime capability snapshot from SQL:

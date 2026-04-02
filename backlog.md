@@ -116,7 +116,7 @@ Issues:
 - [x] `PL-032` Add cache integrity checks and checksum-aware artifact handling.
 - [x] `PL-033` Add memory, concurrency, and timeout controls for local inference.
 - [x] `PL-034` Add optional GPU support for Candle where platform support is stable enough.
-- [ ] `PL-035` Add named config profiles and model aliases for switching between local, staging, and hosted setups.
+- [x] `PL-035` Add named config profiles and model aliases for switching between local, staging, and hosted setups.
 - [ ] `PL-036` Add runtime discovery helpers so Docker and local environments can report readiness cleanly.
 
 ## Milestone 6: Production Safety And Governance

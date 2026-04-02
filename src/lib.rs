@@ -2,6 +2,7 @@
 
 pub(crate) mod backend;
 pub(crate) mod candle;
+pub(crate) mod catalog;
 pub(crate) mod client;
 pub(crate) mod error;
 pub(crate) mod guc;
@@ -29,8 +30,36 @@ pgrx::extension_sql!(
     r"
     COMMENT ON SCHEMA postllm IS
         'PostgreSQL-native LLM orchestration primitives for prompts, chats, and session configuration.';
+
+    CREATE TABLE postllm.config_profiles (
+        name text PRIMARY KEY,
+        description text,
+        config jsonb NOT NULL DEFAULT '{}'::jsonb,
+        created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        CHECK (jsonb_typeof(config) = 'object')
+    );
+
+    COMMENT ON TABLE postllm.config_profiles IS
+        'Named non-secret postllm session profiles for switching between local, staging, and hosted setups.';
+    COMMENT ON COLUMN postllm.config_profiles.config IS
+        'Validated postllm session overrides stored as jsonb.';
+
+    CREATE TABLE postllm.model_aliases (
+        alias text NOT NULL,
+        lane text NOT NULL,
+        model text NOT NULL,
+        description text,
+        created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        PRIMARY KEY (alias, lane),
+        CHECK (lane IN ('generation', 'embedding'))
+    );
+
+    COMMENT ON TABLE postllm.model_aliases IS
+        'Lane-aware generation and embedding model aliases used by postllm resolution paths.';
     ",
-    name = "postllm_schema_comment",
+    name = "postllm_catalog_tables",
     requires = [postllm::settings],
     finalize
 );
@@ -89,6 +118,99 @@ mod postllm {
             candle_max_input_tokens,
             candle_max_concurrency,
         ))
+    }
+
+    /// Returns all named non-secret configuration profiles.
+    #[pg_extern]
+    fn profiles() -> JsonB {
+        crate::finish_json_result(crate::profiles_impl())
+    }
+
+    /// Returns one named non-secret configuration profile.
+    #[pg_extern]
+    fn profile(name: &str) -> JsonB {
+        crate::finish_json_result(crate::profile_impl(name))
+    }
+
+    /// Stores or updates a named non-secret configuration profile.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the SQL surface intentionally exposes a flat profile_set(...) API aligned with configure(...)"
+    )]
+    #[pg_extern]
+    fn profile_set(
+        name: &str,
+        description: default!(Option<&str>, "NULL"),
+        base_url: default!(Option<&str>, "NULL"),
+        model: default!(Option<&str>, "NULL"),
+        embedding_model: default!(Option<&str>, "NULL"),
+        timeout_ms: default!(Option<i32>, "NULL"),
+        max_retries: default!(Option<i32>, "NULL"),
+        retry_backoff_ms: default!(Option<i32>, "NULL"),
+        runtime: default!(Option<&str>, "NULL"),
+        candle_cache_dir: default!(Option<&str>, "NULL"),
+        candle_offline: default!(Option<bool>, "NULL"),
+        candle_device: default!(Option<&str>, "NULL"),
+        candle_max_input_tokens: default!(Option<i32>, "NULL"),
+        candle_max_concurrency: default!(Option<i32>, "NULL"),
+    ) -> JsonB {
+        crate::finish_json_result(crate::profile_set_impl(
+            name,
+            description,
+            base_url,
+            model,
+            embedding_model,
+            timeout_ms,
+            max_retries,
+            retry_backoff_ms,
+            runtime,
+            candle_cache_dir,
+            candle_offline,
+            candle_device,
+            candle_max_input_tokens,
+            candle_max_concurrency,
+        ))
+    }
+
+    /// Applies a named non-secret configuration profile to the current session.
+    #[pg_extern]
+    fn profile_apply(name: &str) -> JsonB {
+        crate::finish_json_result(crate::profile_apply_impl(name))
+    }
+
+    /// Deletes a named configuration profile.
+    #[pg_extern]
+    fn profile_delete(name: &str) -> JsonB {
+        crate::finish_json_result(crate::profile_delete_impl(name))
+    }
+
+    /// Returns all configured model aliases.
+    #[pg_extern]
+    fn model_aliases() -> JsonB {
+        crate::finish_json_result(crate::model_aliases_impl())
+    }
+
+    /// Returns one configured model alias.
+    #[pg_extern]
+    fn model_alias(alias: &str, lane: &str) -> JsonB {
+        crate::finish_json_result(crate::model_alias_impl(alias, lane))
+    }
+
+    /// Stores or updates a lane-aware model alias.
+    #[pg_extern]
+    fn model_alias_set(
+        alias: &str,
+        lane: &str,
+        model: &str,
+        description: default!(Option<&str>, "NULL"),
+    ) -> JsonB {
+        crate::finish_json_result(crate::model_alias_set_impl(alias, lane, model, description))
+    }
+
+    /// Deletes a lane-aware model alias.
+    #[pg_extern]
+    fn model_alias_delete(alias: &str, lane: &str) -> JsonB {
+        crate::finish_json_result(crate::model_alias_delete_impl(alias, lane))
     }
 
     /// Builds a chat message object that can be used with [`chat`].
@@ -1612,6 +1734,85 @@ fn embed_impl(input: &str, model: Option<&str>, normalize: bool) -> Result<Vec<f
         .ok_or_else(|| Error::Candle("the local embedding backend returned no vectors".to_owned()))
 }
 
+fn profiles_impl() -> Result<Value> {
+    catalog::profiles()
+}
+
+fn profile_impl(name: &str) -> Result<Value> {
+    catalog::profile(name)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the SQL surface intentionally exposes a flat profile_set(...) API aligned with configure(...)"
+)]
+fn profile_set_impl(
+    name: &str,
+    description: Option<&str>,
+    base_url: Option<&str>,
+    model: Option<&str>,
+    embedding_model: Option<&str>,
+    timeout_ms: Option<i32>,
+    max_retries: Option<i32>,
+    retry_backoff_ms: Option<i32>,
+    runtime: Option<&str>,
+    candle_cache_dir: Option<&str>,
+    candle_offline: Option<bool>,
+    candle_device: Option<&str>,
+    candle_max_input_tokens: Option<i32>,
+    candle_max_concurrency: Option<i32>,
+) -> Result<Value> {
+    let overrides = guc::SessionOverrides::from_configure_args(
+        base_url,
+        model,
+        embedding_model,
+        None,
+        timeout_ms,
+        max_retries,
+        retry_backoff_ms,
+        runtime,
+        candle_cache_dir,
+        candle_offline,
+        candle_device,
+        candle_max_input_tokens,
+        candle_max_concurrency,
+    )?;
+
+    catalog::profile_set(name, description, &overrides)
+}
+
+fn profile_apply_impl(name: &str) -> Result<Value> {
+    catalog::profile_apply(name)
+}
+
+fn profile_delete_impl(name: &str) -> Result<Value> {
+    catalog::profile_delete(name)
+}
+
+fn model_aliases_impl() -> Result<Value> {
+    catalog::model_aliases()
+}
+
+fn model_alias_impl(alias: &str, lane: &str) -> Result<Value> {
+    let lane = catalog::ModelAliasLane::parse("lane", lane)?;
+    catalog::model_alias(alias, lane)
+}
+
+fn model_alias_set_impl(
+    alias: &str,
+    lane: &str,
+    model: &str,
+    description: Option<&str>,
+) -> Result<Value> {
+    let lane = catalog::ModelAliasLane::parse("lane", lane)?;
+    catalog::model_alias_set(alias, lane, model, description)
+}
+
+fn model_alias_delete_impl(alias: &str, lane: &str) -> Result<Value> {
+    let lane = catalog::ModelAliasLane::parse("lane", lane)?;
+    catalog::model_alias_delete(alias, lane)
+}
+
 fn embedding_model_info_impl(model: Option<&str>) -> Result<Value> {
     let model = guc::resolve_embedding_model(model)?;
     let candle_cache_dir = guc::resolve_candle_cache_dir();
@@ -1690,17 +1891,14 @@ fn resolve_local_model_target(model: Option<&str>, lane: Option<&str>) -> Result
 
     match (requested_model, lane) {
         (Some(model), LocalModelLaneSelector::Embedding) => Ok(LocalModelTarget {
-            model,
+            model: resolve_aliased_local_model(&model, catalog::ModelAliasLane::Embedding)?,
             lane: candle::LocalModelLane::Embedding,
         }),
         (Some(model), LocalModelLaneSelector::Generation) => Ok(LocalModelTarget {
-            model,
+            model: resolve_aliased_local_model(&model, catalog::ModelAliasLane::Generation)?,
             lane: candle::LocalModelLane::Generation,
         }),
-        (Some(model), LocalModelLaneSelector::Auto) => Ok(LocalModelTarget {
-            lane: auto_local_model_lane_for_model(&model),
-            model,
-        }),
+        (Some(model), LocalModelLaneSelector::Auto) => auto_requested_local_model_target(&model),
         (None, LocalModelLaneSelector::Embedding) => {
             let model = guc::resolve_embedding_model(None)?;
             Ok(LocalModelTarget {
@@ -1735,6 +1933,36 @@ fn auto_local_model_target() -> Result<LocalModelTarget> {
         model,
         lane: candle::LocalModelLane::Embedding,
     })
+}
+
+fn auto_requested_local_model_target(model: &str) -> Result<LocalModelTarget> {
+    if let Some(generation_model) =
+        catalog::resolve_model_alias(model, catalog::ModelAliasLane::Generation)?
+    {
+        return Ok(LocalModelTarget {
+            model: generation_model,
+            lane: candle::LocalModelLane::Generation,
+        });
+    }
+
+    if let Some(embedding_model) =
+        catalog::resolve_model_alias(model, catalog::ModelAliasLane::Embedding)?
+    {
+        return Ok(LocalModelTarget {
+            model: embedding_model,
+            lane: candle::LocalModelLane::Embedding,
+        });
+    }
+
+    Ok(LocalModelTarget {
+        lane: auto_local_model_lane_for_model(model),
+        model: model.to_owned(),
+    })
+}
+
+fn resolve_aliased_local_model(model: &str, lane: catalog::ModelAliasLane) -> Result<String> {
+    catalog::resolve_model_alias(model, lane)
+        .map(|resolved| resolved.unwrap_or_else(|| model.to_owned()))
 }
 
 fn auto_local_model_lane_for_model(model: &str) -> candle::LocalModelLane {
@@ -5273,6 +5501,170 @@ mod tests {
     }
 
     #[pg_test]
+    fn sql_profiles_and_model_aliases_should_default_to_empty_arrays() {
+        assert_eq!(sql_json("SELECT postllm.profiles()"), json!([]));
+        assert_eq!(sql_json("SELECT postllm.model_aliases()"), json!([]));
+    }
+
+    #[pg_test]
+    fn sql_profile_set_should_store_and_apply_named_configuration() {
+        let stored = sql_json(
+            "SELECT postllm.profile_set(
+                name => 'hosted-staging',
+                description => 'Hosted staging profile',
+                runtime => 'openai',
+                base_url => 'http://127.0.0.1:9090/v1/chat/completions',
+                model => 'staging-chat',
+                timeout_ms => 9000,
+                max_retries => 1,
+                retry_backoff_ms => 50
+            )",
+        );
+        let fetched = sql_json("SELECT postllm.profile('hosted-staging')");
+        let listed = sql_json("SELECT postllm.profiles()");
+        let applied = sql_json("SELECT postllm.profile_apply('hosted-staging')");
+
+        assert_eq!(stored["name"], "hosted-staging");
+        assert_eq!(stored["description"], "Hosted staging profile");
+        assert_eq!(
+            stored["config"],
+            json!({
+                "runtime": "openai",
+                "base_url": "http://127.0.0.1:9090/v1/chat/completions",
+                "model": "staging-chat",
+                "timeout_ms": 9000,
+                "max_retries": 1,
+                "retry_backoff_ms": 50,
+            })
+        );
+        assert_eq!(fetched["name"], "hosted-staging");
+        assert_eq!(listed.as_array().map(Vec::len), Some(1));
+        assert_eq!(listed[0]["name"], "hosted-staging");
+        assert_eq!(applied["profile"], "hosted-staging");
+        assert_eq!(applied["runtime"], "openai");
+        assert_eq!(
+            applied["base_url"],
+            "http://127.0.0.1:9090/v1/chat/completions"
+        );
+        assert_eq!(applied["model"], "staging-chat");
+        assert_eq!(applied["timeout_ms"], 9000);
+        assert_eq!(applied["max_retries"], 1);
+        assert_eq!(applied["retry_backoff_ms"], 50);
+    }
+
+    #[pg_test]
+    fn sql_profile_apply_should_reset_unspecified_settings_to_defaults() {
+        drop(sql_json(
+            "SELECT postllm.configure(
+                runtime => 'candle',
+                model => 'Qwen/Qwen2.5-0.5B-Instruct',
+                candle_offline => true,
+                candle_device => 'cpu',
+                candle_max_input_tokens => 512,
+                candle_max_concurrency => 3
+            )",
+        ));
+        drop(sql_json(
+            "SELECT postllm.profile_set(
+                name => 'hosted-default-reset',
+                runtime => 'openai',
+                base_url => 'http://127.0.0.1:8080/v1/chat/completions',
+                model => 'reset-chat'
+            )",
+        ));
+
+        let applied = sql_json("SELECT postllm.profile_apply('hosted-default-reset')");
+
+        assert_eq!(applied["runtime"], "openai");
+        assert_eq!(
+            applied["base_url"],
+            "http://127.0.0.1:8080/v1/chat/completions"
+        );
+        assert_eq!(applied["model"], "reset-chat");
+        assert_eq!(
+            applied["embedding_model"],
+            "sentence-transformers/paraphrase-MiniLM-L3-v2"
+        );
+        assert_eq!(applied["candle_offline"], false);
+        assert_eq!(applied["candle_device"], "auto");
+        assert_eq!(applied["candle_max_input_tokens"], 0);
+        assert_eq!(applied["candle_max_concurrency"], 0);
+    }
+
+    #[pg_test]
+    fn sql_profile_and_model_alias_delete_should_remove_rows() {
+        drop(sql_json(
+            "SELECT postllm.profile_set(name => 'to-delete', runtime => 'openai', model => 'delete-me')",
+        ));
+        drop(sql_json(
+            "SELECT postllm.model_alias_set(alias => 'starter', lane => 'generation', model => 'Qwen/Qwen2.5-0.5B-Instruct')",
+        ));
+
+        let deleted_profile = sql_json("SELECT postllm.profile_delete('to-delete')");
+        let deleted_alias =
+            sql_json("SELECT postllm.model_alias_delete(alias => 'starter', lane => 'generation')");
+
+        assert_eq!(deleted_profile["name"], "to-delete");
+        assert_eq!(deleted_profile["deleted"], true);
+        assert_eq!(deleted_alias["alias"], "starter");
+        assert_eq!(deleted_alias["lane"], "generation");
+        assert_eq!(deleted_alias["deleted"], true);
+        assert_eq!(sql_json("SELECT postllm.profiles()"), json!([]));
+        assert_eq!(sql_json("SELECT postllm.model_aliases()"), json!([]));
+    }
+
+    #[pg_test]
+    fn sql_model_aliases_should_resolve_for_capabilities_and_lifecycle() {
+        let generation_alias = sql_json(
+            "SELECT postllm.model_alias_set(
+                alias => 'starter',
+                lane => 'generation',
+                model => 'Qwen/Qwen2.5-0.5B-Instruct',
+                description => 'Starter local generation model'
+            )",
+        );
+        let embedding_alias = sql_json(
+            "SELECT postllm.model_alias_set(
+                alias => 'small-embed',
+                lane => 'embedding',
+                model => 'sentence-transformers/all-MiniLM-L6-v2',
+                description => 'Compact embedding model'
+            )",
+        );
+        let configured = sql_json(
+            "SELECT postllm.configure(runtime => 'candle', model => 'starter', embedding_model => 'small-embed')",
+        );
+        let capabilities = sql_json("SELECT postllm.capabilities()");
+        let embedding_info = sql_json("SELECT postllm.embedding_model_info('small-embed')");
+        let model_inspect =
+            sql_json("SELECT postllm.model_inspect(model => 'starter', lane => 'generation')");
+        let fetched_generation_alias =
+            sql_json("SELECT postllm.model_alias(alias => 'starter', lane => 'generation')");
+
+        assert_eq!(generation_alias["alias"], "starter");
+        assert_eq!(generation_alias["model"], "Qwen/Qwen2.5-0.5B-Instruct");
+        assert_eq!(embedding_alias["alias"], "small-embed");
+        assert_eq!(
+            embedding_alias["model"],
+            "sentence-transformers/all-MiniLM-L6-v2"
+        );
+        assert_eq!(configured["model"], "starter");
+        assert_eq!(configured["embedding_model"], "small-embed");
+        assert_eq!(capabilities["model"], "Qwen/Qwen2.5-0.5B-Instruct");
+        assert_eq!(
+            capabilities["embedding_model"],
+            "sentence-transformers/all-MiniLM-L6-v2"
+        );
+        assert_eq!(capabilities["features"]["chat"]["available"], true);
+        assert_eq!(
+            embedding_info["model"],
+            "sentence-transformers/all-MiniLM-L6-v2"
+        );
+        assert_eq!(model_inspect["model"], "Qwen/Qwen2.5-0.5B-Instruct");
+        assert_eq!(fetched_generation_alias["alias"], "starter");
+    }
+
+    #[pg_test]
     fn sql_capabilities_should_report_default_runtime_and_embeddings() {
         let capabilities = sql_json("SELECT postllm.capabilities()");
 
@@ -6698,6 +7090,36 @@ mod tests {
     fn sql_configure_should_reject_unknown_candle_device() {
         drop(Spi::get_one::<JsonB>(
             "SELECT postllm.configure(candle_device => 'tpu')",
+        ));
+    }
+
+    #[pg_test]
+    #[should_panic(
+        expected = "postllm received an invalid argument: argument 'profile' must include at least one setting override; fix: pass one or more settings such as runtime => 'candle', model => 'Qwen/Qwen2.5-0.5B-Instruct', or base_url => 'http://127.0.0.1:11434/v1/chat/completions'"
+    )]
+    fn sql_profile_set_should_reject_empty_profiles() {
+        drop(Spi::get_one::<JsonB>(
+            "SELECT postllm.profile_set(name => 'empty-profile')",
+        ));
+    }
+
+    #[pg_test]
+    #[should_panic(
+        expected = "postllm received an invalid argument: argument 'name' refers to unknown profile 'missing-profile'; fix: create it with postllm.profile_set(...) or choose one from postllm.profiles()"
+    )]
+    fn sql_profile_apply_should_reject_unknown_profiles() {
+        drop(Spi::get_one::<JsonB>(
+            "SELECT postllm.profile_apply('missing-profile')",
+        ));
+    }
+
+    #[pg_test]
+    #[should_panic(
+        expected = "postllm received an invalid argument: argument 'lane' must be one of 'generation' or 'embedding', got 'vision'; fix: pass lane => 'generation' or 'embedding'"
+    )]
+    fn sql_model_alias_set_should_reject_unknown_lanes() {
+        drop(Spi::get_one::<JsonB>(
+            "SELECT postllm.model_alias_set(alias => 'bad', lane => 'vision', model => 'example')",
         ));
     }
 

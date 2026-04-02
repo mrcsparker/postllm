@@ -33,6 +33,8 @@ Local Candle runtime controls now include `postllm.candle_max_input_tokens` for 
 
 Optional local GPU selection is now available through `postllm.candle_device`, with `auto`, `cpu`, `cuda`, and `metal` modes. CUDA and Metal require building `postllm` with the matching `candle-cuda` or `candle-metal` crate feature, while `auto` falls back to CPU when no accelerator is available.
 
+Named non-secret configuration profiles and lane-aware model aliases are now available through `postllm.profile_set(...)`, `postllm.profile_apply(...)`, and `postllm.model_alias_set(...)`, so switching between local and hosted setups no longer requires hand-editing a full bundle of session settings each time.
+
 Reranking is now available through `postllm.rerank(...)`. On the Candle runtime it reuses the active local embedding model and scores candidates by local similarity. On the `openai` runtime it forwards a hosted rerank request to `postllm.base_url` and normalizes the returned ranked rows.
 
 ## Why Candle
@@ -81,6 +83,7 @@ Phase 4: artifact management
 - `postllm.candle_offline` now forces Candle to use already-cached artifacts only, so local embedding, rerank, lifecycle, and starter-generation calls fail fast on cache misses instead of downloading from Hugging Face.
 - Cached files now verify against checksum-named Hugging Face blobs when possible, and `postllm.model_install(...)` evicts the repo cache if integrity validation fails.
 - `postllm.candle_device` now supports `auto`, `cpu`, `cuda`, and `metal`, with device-aware memory caching so CPU and accelerated runtimes do not collide inside one backend process.
+- `postllm.profile_set(...)`, `postllm.profile_apply(...)`, and `postllm.model_alias_set(...)` now provide a higher-level operator workflow for switching between local Candle and hosted setups without rewriting full session configuration by hand.
 - Use a configurable local cache directory for weights and tokenizers.
 - Decide whether model loading is per-backend process, per-session, or shared global state.
 
