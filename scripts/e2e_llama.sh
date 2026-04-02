@@ -23,22 +23,6 @@ cleanup() {
 
 trap cleanup EXIT
 
-wait_for_http() {
-  local url=$1
-  local timeout_seconds=$2
-  local deadline=$((SECONDS + timeout_seconds))
-
-  until curl --fail --silent --show-error "${url}" >/dev/null; do
-    if (( SECONDS >= deadline )); then
-      echo "Timed out waiting for ${url}" >&2
-      docker compose "${COMPOSE_ARGS[@]}" logs --no-color llama postgres >&2 || true
-      return 1
-    fi
-
-    sleep 2
-  done
-}
-
 wait_for_postgres() {
   local timeout_seconds=$1
   local deadline=$((SECONDS + timeout_seconds))
@@ -82,22 +66,40 @@ wait_for_sql() {
   done
 }
 
+wait_for_runtime_ready() {
+  local timeout_seconds=$1
+  local deadline=$((SECONDS + timeout_seconds))
+
+  until [[ "$(psql_query "SELECT postllm.runtime_ready();" | tr -d '\r' | tr -d '[:space:]')" == "t" ]]; do
+    if (( SECONDS >= deadline )); then
+      echo "Timed out waiting for postllm runtime readiness" >&2
+      psql_query "SELECT postllm.runtime_discover()::text;" >&2 || true
+      docker compose "${COMPOSE_ARGS[@]}" logs --no-color llama postgres >&2 || true
+      return 1
+    fi
+
+    sleep 2
+  done
+}
+
 echo "Starting llama-server and PostgreSQL..."
 docker compose "${COMPOSE_ARGS[@]}" up -d --build
-
-echo "Waiting for llama-server model readiness..."
-wait_for_http "http://127.0.0.1:18080/v1/models" 900
 
 echo "Waiting for PostgreSQL readiness..."
 wait_for_postgres 300
 wait_for_sql 120
 
+echo "Waiting for postllm runtime readiness..."
+wait_for_runtime_ready 900
+
 settings_json="$(psql_query "SELECT postllm.settings()::text;" | tr -d '\r')"
+runtime_discovery_json="$(psql_query "SELECT postllm.runtime_discover()::text;" | tr -d '\r')"
 response="$(psql_query "SELECT trim(postllm.complete(prompt => 'Reply with the single word ok.', system_prompt => 'You are a literal test harness. Reply with only ok.', temperature => 0.0, max_tokens => 8));" | tr -d '\r')"
 response_normalized="${response//$'\n'/ }"
 response_lower="$(printf '%s' "${response_normalized}" | tr '[:upper:]' '[:lower:]')"
 
 echo "Resolved settings: ${settings_json}"
+echo "Runtime discovery: ${runtime_discovery_json}"
 echo "Model response: ${response_normalized}"
 
 if [[ -z "${response_lower// /}" ]]; then

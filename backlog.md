@@ -117,7 +117,7 @@ Issues:
 - [x] `PL-033` Add memory, concurrency, and timeout controls for local inference.
 - [x] `PL-034` Add optional GPU support for Candle where platform support is stable enough.
 - [x] `PL-035` Add named config profiles and model aliases for switching between local, staging, and hosted setups.
-- [ ] `PL-036` Add runtime discovery helpers so Docker and local environments can report readiness cleanly.
+- [x] `PL-036` Add runtime discovery helpers so Docker and local environments can report readiness cleanly.
 
 ## Milestone 6: Production Safety And Governance
 

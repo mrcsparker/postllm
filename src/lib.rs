@@ -17,6 +17,7 @@ use pgrx::spi::Spi;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use std::path::Path;
 
 ::pgrx::pg_module_magic!(name, version);
 
@@ -80,6 +81,18 @@ mod postllm {
     #[pg_extern]
     fn capabilities() -> JsonB {
         JsonB(crate::guc::capabilities_snapshot())
+    }
+
+    /// Reports the active runtime discovery and readiness snapshot without raising probe failures.
+    #[pg_extern]
+    fn runtime_discover() -> JsonB {
+        JsonB(crate::runtime_discover_impl())
+    }
+
+    /// Returns whether the active runtime currently appears ready to serve requests.
+    #[pg_extern]
+    fn runtime_ready() -> bool {
+        crate::runtime_ready_impl()
     }
 
     /// Applies session-level configuration overrides and returns the resulting settings snapshot.
@@ -1881,6 +1894,175 @@ fn model_evict_impl(model: Option<&str>, lane: Option<&str>, scope: &str) -> Res
         candle_offline,
         candle_device,
     )
+}
+
+fn runtime_discover_impl() -> Value {
+    match guc::resolve(None) {
+        Ok(settings) => match settings.runtime {
+            backend::Runtime::OpenAi => {
+                let mut discovery = client::discover_openai_runtime(&settings);
+                if let Some(object) = discovery.as_object_mut() {
+                    object.insert(
+                        "execution_environment".to_owned(),
+                        json!(execution_environment()),
+                    );
+                }
+                discovery
+            }
+            backend::Runtime::Candle => discover_candle_runtime(&settings),
+        },
+        Err(error) => json!({
+            "runtime": guc::snapshot().get("runtime").cloned().unwrap_or(Value::Null),
+            "provider": Value::Null,
+            "ready": false,
+            "reason": error.to_string(),
+            "execution_environment": execution_environment(),
+            "settings": guc::snapshot(),
+            "capabilities": guc::capabilities_snapshot(),
+        }),
+    }
+}
+
+fn runtime_ready_impl() -> bool {
+    runtime_discover_impl()
+        .get("ready")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn execution_environment() -> &'static str {
+    if Path::new("/.dockerenv").exists() {
+        "docker"
+    } else {
+        "local"
+    }
+}
+
+fn discover_candle_runtime(settings: &backend::Settings) -> Value {
+    let embedding_model = match guc::resolve_embedding_model(None) {
+        Ok(model) => model,
+        Err(error) => {
+            return json!({
+                "runtime": settings.runtime.as_str(),
+                "provider": "candle",
+                "ready": false,
+                "reason": error.to_string(),
+                "execution_environment": execution_environment(),
+                "model": settings.model,
+                "embedding_model": Value::Null,
+                "offline": settings.candle_offline,
+                "capabilities": guc::capabilities_snapshot(),
+            });
+        }
+    };
+    let cache_dir = settings.candle_cache_dir.as_deref();
+
+    let generation = match candle::inspect_model(
+        &settings.model,
+        candle::LocalModelLane::Generation,
+        cache_dir,
+        settings.candle_offline,
+        settings.candle_device,
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return json!({
+                "runtime": settings.runtime.as_str(),
+                "provider": "candle",
+                "ready": false,
+                "reason": error.to_string(),
+                "execution_environment": execution_environment(),
+                "model": settings.model,
+                "embedding_model": embedding_model,
+                "offline": settings.candle_offline,
+                "capabilities": backend::CapabilitySnapshot::from_settings(settings, Some(&embedding_model)).snapshot(),
+            });
+        }
+    };
+
+    let embedding = match candle::inspect_model(
+        &embedding_model,
+        candle::LocalModelLane::Embedding,
+        cache_dir,
+        settings.candle_offline,
+        settings.candle_device,
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return json!({
+                "runtime": settings.runtime.as_str(),
+                "provider": "candle",
+                "ready": false,
+                "reason": error.to_string(),
+                "execution_environment": execution_environment(),
+                "model": settings.model,
+                "embedding_model": embedding_model,
+                "offline": settings.candle_offline,
+                "capabilities": backend::CapabilitySnapshot::from_settings(settings, Some(&embedding_model)).snapshot(),
+                "generation": generation,
+            });
+        }
+    };
+
+    let generation_device_available = generation
+        .get("device")
+        .and_then(|device| device.get("available"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let generation_supported = generation
+        .get("metadata")
+        .and_then(|metadata| metadata.get("supported"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let generation_cached = generation
+        .get("disk_cached")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || generation
+            .get("memory_cached")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    let cold_start = !generation_cached;
+    let cache_ready = !settings.candle_offline || generation_cached;
+    let ready = generation_device_available && generation_supported && cache_ready;
+    let reason = if !generation_device_available {
+        generation
+            .get("device")
+            .and_then(|device| device.get("reason"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| Some("the requested Candle device is not available".to_owned()))
+    } else if !generation_supported {
+        guc::capabilities_snapshot()
+            .get("features")
+            .and_then(|features| features.get("chat"))
+            .and_then(|chat| chat.get("reason"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| Some("the configured Candle generation model is not supported".to_owned()))
+    } else if !cache_ready {
+        Some(format!(
+            "postllm.candle_offline is enabled and model '{}' is not cached locally",
+            settings.model
+        ))
+    } else {
+        None
+    };
+
+    json!({
+        "runtime": settings.runtime.as_str(),
+        "provider": "candle",
+        "ready": ready,
+        "reason": reason,
+        "execution_environment": execution_environment(),
+        "model": settings.model,
+        "embedding_model": embedding_model,
+        "offline": settings.candle_offline,
+        "cold_start": cold_start,
+        "capabilities": backend::CapabilitySnapshot::from_settings(settings, Some(&embedding_model)).snapshot(),
+        "generation": generation,
+        "embedding": embedding,
+    })
 }
 
 fn resolve_local_model_target(model: Option<&str>, lane: Option<&str>) -> Result<LocalModelTarget> {
@@ -5186,6 +5368,12 @@ mod tests {
             .expect("query should return a row")
     }
 
+    fn sql_bool(query: &str) -> bool {
+        Spi::get_one::<bool>(query)
+            .expect("SPI should execute")
+            .expect("query should return a row")
+    }
+
     fn sql_optional_text(query: &str) -> Option<String> {
         Spi::get_one::<String>(query).expect("SPI should execute")
     }
@@ -5235,6 +5423,34 @@ mod tests {
             sender
                 .send(request_body)
                 .expect("request body should be sent back to the test");
+        });
+
+        (address, receiver)
+    }
+
+    fn start_mock_runtime_discovery_server(
+        status_code: u16,
+        response_body: &str,
+    ) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let address = format!(
+            "http://{}/v1/chat/completions",
+            listener
+                .local_addr()
+                .expect("listener should have a local address")
+        );
+        let (sender, receiver) = mpsc::channel();
+        let response_body = response_body.to_owned();
+
+        thread::spawn(move || {
+            let (stream, _) = listener
+                .accept()
+                .expect("server should accept one connection");
+            let request_line =
+                read_mock_runtime_discovery_request(stream, status_code, &response_body);
+            sender
+                .send(request_line)
+                .expect("request line should be sent back to the test");
         });
 
         (address, receiver)
@@ -5354,6 +5570,45 @@ mod tests {
         stream.flush().expect("response should flush");
 
         serde_json::from_slice(&body).expect("request body should be valid JSON")
+    }
+
+    fn read_mock_runtime_discovery_request(
+        mut stream: TcpStream,
+        status_code: u16,
+        response_body: &str,
+    ) -> String {
+        let mut reader = BufReader::new(stream.try_clone().expect("stream should clone"));
+        let mut request_line = String::new();
+        reader
+            .read_line(&mut request_line)
+            .expect("request line should read");
+        assert!(
+            request_line.starts_with("GET /v1/models HTTP/1.1"),
+            "unexpected request line: {request_line}"
+        );
+
+        loop {
+            let mut header_line = String::new();
+            reader
+                .read_line(&mut header_line)
+                .expect("header line should read");
+
+            if header_line == "\r\n" {
+                break;
+            }
+        }
+
+        write!(
+            stream,
+            "HTTP/1.1 {} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            status_code,
+            response_body.len(),
+            response_body
+        )
+        .expect("response should write");
+        stream.flush().expect("response should flush");
+
+        request_line
     }
 
     fn candle_generation_pg_test_enabled() -> bool {
@@ -6866,6 +7121,118 @@ mod tests {
             capabilities["features"]["streaming"]["reason"],
             "streaming is not implemented by the local Candle runtime"
         );
+    }
+
+    #[pg_test]
+    fn sql_runtime_discover_should_probe_openai_models_endpoint() {
+        let (base_url, receiver) = start_mock_runtime_discovery_server(
+            200,
+            r#"{"data":[{"id":"llama3.2"},{"id":"other-model"}]}"#,
+        );
+        let configured = sql_json(&format!(
+            "SELECT postllm.configure(runtime => 'openai', base_url => {}, model => 'llama3.2')",
+            sql_literal(&base_url)
+        ));
+        let discovery = sql_json("SELECT postllm.runtime_discover()");
+        let ready = sql_bool("SELECT postllm.runtime_ready()");
+        let request_line = receiver
+            .recv()
+            .expect("runtime discovery probe should hit the mock server");
+
+        assert_eq!(configured["runtime"], "openai");
+        assert!(request_line.starts_with("GET /v1/models HTTP/1.1"));
+        assert_eq!(discovery["runtime"], "openai");
+        assert_eq!(discovery["ready"], true);
+        assert_eq!(discovery["provider"], "openai-compatible");
+        assert_eq!(discovery["model"], "llama3.2");
+        assert_eq!(discovery["model_listed"], true);
+        assert_eq!(discovery["status_code"], 200);
+        assert_eq!(discovery["base_url_kind"], "loopback");
+        assert_eq!(discovery["execution_environment"], "local");
+        assert_eq!(ready, true);
+    }
+
+    #[pg_test]
+    fn sql_runtime_discover_should_flag_missing_openai_model() {
+        let (base_url, receiver) =
+            start_mock_runtime_discovery_server(200, r#"{"data":[{"id":"different-model"}]}"#);
+        drop(Spi::get_one::<JsonB>(&format!(
+            "SELECT postllm.configure(runtime => 'openai', base_url => {}, model => 'llama3.2')",
+            sql_literal(&base_url)
+        )));
+
+        let discovery = sql_json("SELECT postllm.runtime_discover()");
+        let ready = sql_bool("SELECT postllm.runtime_ready()");
+
+        receiver
+            .recv()
+            .expect("runtime discovery probe should hit the mock server");
+
+        assert_eq!(discovery["runtime"], "openai");
+        assert_eq!(discovery["ready"], false);
+        assert_eq!(discovery["reachable"], true);
+        assert_eq!(discovery["model_listed"], false);
+        assert!(
+            discovery["reason"]
+                .as_str()
+                .expect("missing-model discovery should expose a reason")
+                .contains("was not listed by the discovery endpoint")
+        );
+        assert_eq!(ready, false);
+    }
+
+    #[pg_test]
+    fn sql_runtime_discover_should_report_candle_generation_readiness() {
+        let cache_dir = fresh_test_cache_dir("runtime-discover-candle");
+        let configured = sql_json(&format!(
+            "SELECT postllm.configure(runtime => 'candle', model => 'Qwen/Qwen2.5-0.5B-Instruct', candle_cache_dir => {}, candle_offline => false, candle_device => 'cpu')",
+            sql_literal(&cache_dir)
+        ));
+        let discovery = sql_json("SELECT postllm.runtime_discover()");
+        let ready = sql_bool("SELECT postllm.runtime_ready()");
+
+        assert_eq!(configured["runtime"], "candle");
+        assert_eq!(discovery["runtime"], "candle");
+        assert_eq!(discovery["provider"], "candle");
+        assert_eq!(discovery["ready"], true);
+        assert_eq!(discovery["cold_start"], true);
+        assert_eq!(discovery["model"], "Qwen/Qwen2.5-0.5B-Instruct");
+        assert_eq!(
+            discovery["embedding_model"],
+            "sentence-transformers/paraphrase-MiniLM-L3-v2"
+        );
+        assert_eq!(discovery["generation"]["metadata"]["supported"], true);
+        assert_eq!(discovery["generation"]["device"]["resolved"], "cpu");
+        assert_eq!(discovery["embedding"]["lane"], "embedding");
+        assert_eq!(discovery["execution_environment"], "local");
+        assert_eq!(ready, true);
+    }
+
+    #[pg_test]
+    fn sql_runtime_discover_should_report_offline_candle_cache_misses() {
+        let cache_dir = fresh_test_cache_dir("runtime-discover-candle-offline");
+        drop(Spi::get_one::<JsonB>(&format!(
+            "SELECT postllm.configure(runtime => 'candle', model => 'Qwen/Qwen2.5-0.5B-Instruct', candle_cache_dir => {}, candle_offline => true, candle_device => 'cpu')",
+            sql_literal(&cache_dir)
+        )));
+
+        let discovery = sql_json("SELECT postllm.runtime_discover()");
+        let ready = sql_bool("SELECT postllm.runtime_ready()");
+
+        assert_eq!(discovery["runtime"], "candle");
+        assert_eq!(discovery["ready"], false);
+        assert_eq!(discovery["offline"], true);
+        assert_eq!(discovery["generation"]["disk_cached"], false);
+        assert_eq!(discovery["generation"]["memory_cached"], false);
+        assert!(
+            discovery["reason"]
+                .as_str()
+                .expect("offline cache miss should expose a reason")
+                .contains(
+                    "is enabled and model 'Qwen/Qwen2.5-0.5B-Instruct' is not cached locally"
+                )
+        );
+        assert_eq!(ready, false);
     }
 
     #[pg_test]

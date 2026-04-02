@@ -6,6 +6,8 @@ The extension is built around a native schema-scoped API:
 
 - `postllm.settings() -> jsonb`
 - `postllm.capabilities() -> jsonb`
+- `postllm.runtime_discover() -> jsonb`
+- `postllm.runtime_ready() -> bool`
 - `postllm.configure(...) -> jsonb`
 - `postllm.profiles() -> jsonb`
 - `postllm.profile(name text) -> jsonb`
@@ -178,6 +180,15 @@ SELECT postllm.capabilities();
 ```
 
 `postllm.settings()` now includes the same capability metadata under the `capabilities` key so runtime support is visible alongside the current configuration.
+
+For runtime readiness checks, use the discovery helpers:
+
+```sql
+SELECT postllm.runtime_discover();
+SELECT postllm.runtime_ready();
+```
+
+`postllm.runtime_discover()` is intentionally non-throwing for probe failures. On the `openai` runtime it derives a discovery endpoint such as `/v1/models`, reports whether the endpoint is reachable, and checks whether the configured model is listed. On the `candle` runtime it reports the active generation and embedding inspection snapshots, whether the requested device is available, whether offline mode has a cache miss, and whether the local runtime looks ready. `postllm.runtime_ready()` is the simple boolean form when a shell script or deployment check only needs pass/fail.
 
 Generation responses now preserve the provider payload and add a normalized `_postllm` metadata block with `runtime`, `provider`, `base_url`, `model`, `finish_reason`, and `usage`.
 
@@ -687,6 +698,13 @@ psql postgresql://postgres:postgres@127.0.0.1:5440/postllm
 
 The container will point `postllm.base_url` at `http://host.docker.internal:11434/v1/chat/completions` by default, which works well with a host-running Ollama instance.
 
+To confirm the configured runtime from inside SQL, run:
+
+```sql
+SELECT postllm.runtime_discover();
+SELECT postllm.runtime_ready();
+```
+
 For local embeddings, the same image also accepts:
 
 - `POSTLLM_EMBEDDING_MODEL`
@@ -706,7 +724,7 @@ That flow uses:
 - `Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q2_K`
 - the compose override in `compose.llama-e2e.yaml`
 
-The script waits for the model to load, checks `postllm.settings()`, and then runs a small `postllm.complete(...)` smoke query against the live server.
+The script waits for `postllm.runtime_ready()` to report that the configured OpenAI-compatible runtime is reachable from inside the container, checks `postllm.settings()`, and then runs a small `postllm.complete(...)` smoke query against the live server.
 
 ## Dockerized Candle E2E
 
@@ -722,7 +740,7 @@ That flow uses:
 - `sentence-transformers/paraphrase-MiniLM-L3-v2`
 - the compose override in `compose.candle-e2e.yaml`
 
-The script verifies that `postllm.embed(...)` returns a non-empty normalized vector, `postllm.embed_many(...)` returns two batch results, `postllm.chat(...)` returns Candle `_postllm` metadata, and `postllm.complete(...)` produces a non-empty local answer.
+The script waits for `postllm.runtime_ready()` to confirm the configured Candle runtime looks usable, then verifies that `postllm.embed(...)` returns a non-empty normalized vector, `postllm.embed_many(...)` returns two batch results, `postllm.chat(...)` returns Candle `_postllm` metadata, and `postllm.complete(...)` produces a non-empty local answer.
 
 ## Quality Gates
 

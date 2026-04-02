@@ -815,7 +815,7 @@ fn postllm_metadata(response: &Value) -> Option<&Value> {
         .filter(|metadata| metadata.is_object())
 }
 
-fn provider_identity(settings: &Settings) -> String {
+pub(crate) fn provider_identity(settings: &Settings) -> String {
     match settings.runtime {
         Runtime::Candle => Runtime::CANDLE.to_owned(),
         Runtime::OpenAi => infer_openai_provider(settings.base_url.as_deref()),

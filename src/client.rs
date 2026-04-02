@@ -119,6 +119,204 @@ pub(crate) fn chat_stream_response(
     })
 }
 
+/// Probes the configured OpenAI-compatible runtime and reports discovery metadata.
+#[must_use]
+pub(crate) fn discover_openai_runtime(settings: &crate::backend::Settings) -> Value {
+    let provider = crate::backend::provider_identity(settings);
+    let Some(base_url) = settings.base_url.as_deref() else {
+        return json!({
+            "runtime": settings.runtime.as_str(),
+            "provider": provider,
+            "ready": false,
+            "reason": "postllm.base_url is not set",
+            "base_url": Value::Null,
+            "discovery_url": Value::Null,
+            "reachable": false,
+            "authorized": Value::Null,
+            "status_code": Value::Null,
+            "model": settings.model,
+            "model_listed": Value::Null,
+            "listed_models": Vec::<String>::new(),
+            "base_url_host": Value::Null,
+            "base_url_kind": Value::Null,
+        });
+    };
+
+    let Some(discovery_url) = derive_models_url(base_url) else {
+        return json!({
+            "runtime": settings.runtime.as_str(),
+            "provider": provider,
+            "ready": false,
+            "reason": format!("could not derive a discovery endpoint from postllm.base_url='{base_url}'"),
+            "base_url": base_url,
+            "discovery_url": Value::Null,
+            "reachable": false,
+            "authorized": Value::Null,
+            "status_code": Value::Null,
+            "model": settings.model,
+            "model_listed": Value::Null,
+            "listed_models": Vec::<String>::new(),
+            "base_url_host": base_url_host(base_url),
+            "base_url_kind": classify_base_url_kind(base_url),
+        });
+    };
+
+    let timeout_ms = settings.timeout_ms.min(5_000);
+    let client = match Client::builder()
+        .timeout(Duration::from_millis(timeout_ms))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return json!({
+                "runtime": settings.runtime.as_str(),
+                "provider": provider,
+                "ready": false,
+                "reason": error.to_string(),
+                "base_url": base_url,
+                "discovery_url": discovery_url,
+                "reachable": false,
+                "authorized": Value::Null,
+                "status_code": Value::Null,
+                "model": settings.model,
+                "model_listed": Value::Null,
+                "listed_models": Vec::<String>::new(),
+                "base_url_host": base_url_host(base_url),
+                "base_url_kind": classify_base_url_kind(base_url),
+            });
+        }
+    };
+
+    let mut request = client.get(&discovery_url);
+    if let Some(api_key) = settings.api_key.as_deref() {
+        request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
+    }
+
+    let response = match request.send() {
+        Ok(response) => response,
+        Err(error) => {
+            return json!({
+                "runtime": settings.runtime.as_str(),
+                "provider": provider,
+                "ready": false,
+                "reason": error.to_string(),
+                "base_url": base_url,
+                "discovery_url": discovery_url,
+                "reachable": false,
+                "authorized": Value::Null,
+                "status_code": Value::Null,
+                "model": settings.model,
+                "model_listed": Value::Null,
+                "listed_models": Vec::<String>::new(),
+                "base_url_host": base_url_host(base_url),
+                "base_url_kind": classify_base_url_kind(base_url),
+            });
+        }
+    };
+
+    let status = response.status();
+    let status_code = status.as_u16();
+    let authorized = Some(!matches!(
+        status,
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    ));
+    let body = match response.text() {
+        Ok(body) => body,
+        Err(error) => {
+            return json!({
+                "runtime": settings.runtime.as_str(),
+                "provider": provider,
+                "ready": false,
+                "reason": error.to_string(),
+                "base_url": base_url,
+                "discovery_url": discovery_url,
+                "reachable": true,
+                "authorized": authorized,
+                "status_code": status_code,
+                "model": settings.model,
+                "model_listed": Value::Null,
+                "listed_models": Vec::<String>::new(),
+                "base_url_host": base_url_host(base_url),
+                "base_url_kind": classify_base_url_kind(base_url),
+            });
+        }
+    };
+
+    if !status.is_success() {
+        return json!({
+            "runtime": settings.runtime.as_str(),
+            "provider": provider,
+            "ready": false,
+            "reason": format!("discovery endpoint returned HTTP {status_code}: {}", truncate_body(&body)),
+            "base_url": base_url,
+            "discovery_url": discovery_url,
+            "reachable": true,
+            "authorized": authorized,
+            "status_code": status_code,
+            "model": settings.model,
+            "model_listed": Value::Null,
+            "listed_models": Vec::<String>::new(),
+            "base_url_host": base_url_host(base_url),
+            "base_url_kind": classify_base_url_kind(base_url),
+        });
+    }
+
+    let response = match serde_json::from_str::<Value>(&body) {
+        Ok(response) => response,
+        Err(error) => {
+            return json!({
+                "runtime": settings.runtime.as_str(),
+                "provider": provider,
+                "ready": false,
+                "reason": format!("discovery endpoint did not return valid JSON: {error}"),
+                "base_url": base_url,
+                "discovery_url": discovery_url,
+                "reachable": true,
+                "authorized": authorized,
+                "status_code": status_code,
+                "model": settings.model,
+                "model_listed": Value::Null,
+                "listed_models": Vec::<String>::new(),
+                "base_url_host": base_url_host(base_url),
+                "base_url_kind": classify_base_url_kind(base_url),
+            });
+        }
+    };
+
+    let listed_models = extract_model_ids(&response);
+    let model_listed = (!listed_models.is_empty()).then(|| {
+        listed_models
+            .iter()
+            .any(|model| model.as_str() == settings.model.as_str())
+    });
+    let ready = model_listed.unwrap_or(true);
+    let reason = if ready {
+        None
+    } else {
+        Some(format!(
+            "configured model '{}' was not listed by the discovery endpoint",
+            settings.model
+        ))
+    };
+
+    json!({
+        "runtime": settings.runtime.as_str(),
+        "provider": provider,
+        "ready": ready,
+        "reason": reason,
+        "base_url": base_url,
+        "discovery_url": discovery_url,
+        "reachable": true,
+        "authorized": authorized,
+        "status_code": status_code,
+        "model": settings.model,
+        "model_listed": model_listed,
+        "listed_models": listed_models,
+        "base_url_host": base_url_host(base_url),
+        "base_url_kind": classify_base_url_kind(base_url),
+    })
+}
+
 fn execute_chat_response(
     settings: &crate::backend::Settings,
     messages: &[Value],
@@ -138,6 +336,67 @@ fn execute_chat_response(
             tool_choice,
             cancelled,
         )
+    })
+}
+
+fn derive_models_url(base_url: &str) -> Option<String> {
+    let mut url = reqwest::Url::parse(base_url).ok()?;
+    let mut segments = url
+        .path_segments()?
+        .map(str::to_owned)
+        .collect::<Vec<String>>();
+
+    if matches!(segments.last().map(String::as_str), Some("completions")) {
+        segments.pop();
+    }
+    if matches!(segments.last().map(String::as_str), Some("chat")) {
+        segments.pop();
+    }
+    if matches!(
+        segments.last().map(String::as_str),
+        Some("responses" | "embeddings" | "rerank")
+    ) {
+        segments.pop();
+    }
+    if segments.is_empty() {
+        segments.push("v1".to_owned());
+    }
+    if !matches!(segments.last().map(String::as_str), Some("models")) {
+        segments.push("models".to_owned());
+    }
+
+    url.set_path(&format!("/{}", segments.join("/")));
+    Some(url.to_string())
+}
+
+fn extract_model_ids(response: &Value) -> Vec<String> {
+    response
+        .get("data")
+        .and_then(Value::as_array)
+        .map(|data| {
+            data.iter()
+                .filter_map(|entry| entry.get("id").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn base_url_host(base_url: &str) -> Option<String> {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+}
+
+fn classify_base_url_kind(base_url: &str) -> Option<&'static str> {
+    let host = reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))?;
+
+    Some(match host.as_str() {
+        "host.docker.internal" => "docker-host",
+        "127.0.0.1" | "localhost" => "loopback",
+        _ => "remote",
     })
 }
 

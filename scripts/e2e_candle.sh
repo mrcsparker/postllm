@@ -66,14 +66,32 @@ wait_for_sql() {
   done
 }
 
+wait_for_runtime_ready() {
+  local timeout_seconds=$1
+  local deadline=$((SECONDS + timeout_seconds))
+
+  until [[ "$(psql_query "SELECT postllm.runtime_ready();" | tr -d '\r' | tr -d '[:space:]')" == "t" ]]; do
+    if (( SECONDS >= deadline )); then
+      echo "Timed out waiting for postllm runtime readiness" >&2
+      psql_query "SELECT postllm.runtime_discover()::text;" >&2 || true
+      docker compose "${COMPOSE_ARGS[@]}" logs --no-color postgres >&2 || true
+      return 1
+    fi
+
+    sleep 2
+  done
+}
+
 echo "Starting PostgreSQL for Candle smoke test..."
 docker compose "${COMPOSE_ARGS[@]}" up -d --build
 
 echo "Waiting for PostgreSQL readiness..."
 wait_for_postgres 300
 wait_for_sql 120
+wait_for_runtime_ready 300
 
 settings_json="$(psql_query "SELECT postllm.settings()::text;" | tr -d '\r')"
+runtime_discovery_json="$(psql_query "SELECT postllm.runtime_discover()::text;" | tr -d '\r')"
 embedding_dimension="$(psql_query "SELECT array_length(postllm.embed('Candle smoke test'), 1);" | tr -d '\r' | tr -d '[:space:]')"
 embedding_norm="$(psql_query "SELECT sqrt(sum(value * value)) FROM unnest(postllm.embed('Candle smoke test')) AS value;" | tr -d '\r' | tr -d '[:space:]')"
 batch_count="$(psql_query "SELECT jsonb_array_length(postllm.embed_many(ARRAY['alpha', 'beta']));" | tr -d '\r' | tr -d '[:space:]')"
@@ -252,6 +270,9 @@ while IFS= read -r line; do
 done <<<"${offline_settings_fields}"
 offline_enabled="${offline_settings_lines[0]:-False}"
 
+echo "Resolved settings: ${settings_json}"
+echo "Runtime discovery: ${runtime_discovery_json}"
+
 rerank_fields="$(
   RERANK_JSON="${rerank_json}" python3 - <<'PY'
 import json
@@ -306,7 +327,6 @@ hybrid_semantic_rank="${hybrid_field_lines[4]:-}"
 hybrid_keyword_rank="${hybrid_field_lines[5]:-}"
 hybrid_score="${hybrid_field_lines[6]:-0}"
 
-echo "Resolved settings: ${settings_json}"
 echo "Embedding dimension: ${embedding_dimension}"
 echo "Embedding norm: ${embedding_norm}"
 echo "Embedding inspection: ${embedding_inspect_json}"
