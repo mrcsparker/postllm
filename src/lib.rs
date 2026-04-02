@@ -7,6 +7,7 @@ pub(crate) mod client;
 pub(crate) mod error;
 pub(crate) mod guc;
 pub(crate) mod interrupt;
+pub(crate) mod secrets;
 
 use crate::backend::RequestOptions;
 use crate::error::{Error, Result};
@@ -42,9 +43,25 @@ pgrx::extension_sql!(
     );
 
     COMMENT ON TABLE postllm.config_profiles IS
-        'Named non-secret postllm session profiles for switching between local, staging, and hosted setups.';
+        'Named postllm session profiles for switching between local, staging, and hosted setups, including optional provider-secret references.';
     COMMENT ON COLUMN postllm.config_profiles.config IS
         'Validated postllm session overrides stored as jsonb.';
+
+    CREATE TABLE postllm.provider_secrets (
+        name text PRIMARY KEY,
+        description text,
+        algorithm text NOT NULL,
+        nonce text NOT NULL,
+        ciphertext text NOT NULL,
+        key_fingerprint text NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
+    );
+
+    COMMENT ON TABLE postllm.provider_secrets IS
+        'Encrypted provider credentials referenced by postllm session settings and profiles.';
+    COMMENT ON COLUMN postllm.provider_secrets.key_fingerprint IS
+        'Fingerprint of the POSTLLM_SECRET_KEY material used to encrypt the secret.';
 
     CREATE TABLE postllm.model_aliases (
         alias text NOT NULL,
@@ -68,7 +85,10 @@ pgrx::extension_sql!(
 #[pgrx::pg_schema]
 mod postllm {
     use pgrx::iter::TableIterator;
-    use pgrx::{Aggregate, AggregateName, JsonB, ParallelOption, default, pg_aggregate, pg_extern};
+    use pgrx::{
+        Aggregate, AggregateName, JsonB, ParallelOption, default, pg_aggregate, pg_extern,
+        search_path,
+    };
     use serde_json::json;
 
     /// Returns the current backend-visible `postllm` settings.
@@ -100,12 +120,14 @@ mod postllm {
         clippy::too_many_arguments,
         reason = "the SQL surface intentionally exposes a flat configure(...) API instead of forcing callers through JSON"
     )]
-    #[pg_extern]
+    #[pg_extern(security_definer)]
+    #[search_path(postllm, pg_catalog)]
     fn configure(
         base_url: default!(Option<&str>, "NULL"),
         model: default!(Option<&str>, "NULL"),
         embedding_model: default!(Option<&str>, "NULL"),
         api_key: default!(Option<&str>, "NULL"),
+        api_key_secret: default!(Option<&str>, "NULL"),
         timeout_ms: default!(Option<i32>, "NULL"),
         max_retries: default!(Option<i32>, "NULL"),
         retry_backoff_ms: default!(Option<i32>, "NULL"),
@@ -121,6 +143,7 @@ mod postllm {
             model,
             embedding_model,
             api_key,
+            api_key_secret,
             timeout_ms,
             max_retries,
             retry_backoff_ms,
@@ -133,19 +156,19 @@ mod postllm {
         ))
     }
 
-    /// Returns all named non-secret configuration profiles.
+    /// Returns all named configuration profiles.
     #[pg_extern]
     fn profiles() -> JsonB {
         crate::finish_json_result(crate::profiles_impl())
     }
 
-    /// Returns one named non-secret configuration profile.
+    /// Returns one named configuration profile.
     #[pg_extern]
     fn profile(name: &str) -> JsonB {
         crate::finish_json_result(crate::profile_impl(name))
     }
 
-    /// Stores or updates a named non-secret configuration profile.
+    /// Stores or updates a named configuration profile.
     #[expect(
         clippy::too_many_arguments,
         reason = "the SQL surface intentionally exposes a flat profile_set(...) API aligned with configure(...)"
@@ -157,6 +180,7 @@ mod postllm {
         base_url: default!(Option<&str>, "NULL"),
         model: default!(Option<&str>, "NULL"),
         embedding_model: default!(Option<&str>, "NULL"),
+        api_key_secret: default!(Option<&str>, "NULL"),
         timeout_ms: default!(Option<i32>, "NULL"),
         max_retries: default!(Option<i32>, "NULL"),
         retry_backoff_ms: default!(Option<i32>, "NULL"),
@@ -173,6 +197,7 @@ mod postllm {
             base_url,
             model,
             embedding_model,
+            api_key_secret,
             timeout_ms,
             max_retries,
             retry_backoff_ms,
@@ -185,8 +210,9 @@ mod postllm {
         ))
     }
 
-    /// Applies a named non-secret configuration profile to the current session.
-    #[pg_extern]
+    /// Applies a named configuration profile to the current session.
+    #[pg_extern(security_definer)]
+    #[search_path(postllm, pg_catalog)]
     fn profile_apply(name: &str) -> JsonB {
         crate::finish_json_result(crate::profile_apply_impl(name))
     }
@@ -195,6 +221,34 @@ mod postllm {
     #[pg_extern]
     fn profile_delete(name: &str) -> JsonB {
         crate::finish_json_result(crate::profile_delete_impl(name))
+    }
+
+    /// Returns all stored provider secret metadata.
+    #[pg_extern(security_definer)]
+    #[search_path(postllm, pg_catalog)]
+    fn secrets() -> JsonB {
+        crate::finish_json_result(crate::secrets_impl())
+    }
+
+    /// Returns one stored provider secret metadata record.
+    #[pg_extern(security_definer)]
+    #[search_path(postllm, pg_catalog)]
+    fn secret(name: &str) -> JsonB {
+        crate::finish_json_result(crate::secret_impl(name))
+    }
+
+    /// Stores or updates a named encrypted provider secret.
+    #[pg_extern(security_definer)]
+    #[search_path(postllm, pg_catalog)]
+    fn secret_set(name: &str, value: &str, description: default!(Option<&str>, "NULL")) -> JsonB {
+        crate::finish_json_result(crate::secret_set_impl(name, value, description))
+    }
+
+    /// Deletes a stored provider secret.
+    #[pg_extern(security_definer)]
+    #[search_path(postllm, pg_catalog)]
+    fn secret_delete(name: &str) -> JsonB {
+        crate::finish_json_result(crate::secret_delete_impl(name))
     }
 
     /// Returns all configured model aliases.
@@ -1755,6 +1809,26 @@ fn profile_impl(name: &str) -> Result<Value> {
     catalog::profile(name)
 }
 
+fn secrets_impl() -> Result<Value> {
+    require_superuser("postllm.secrets")?;
+    catalog::secrets()
+}
+
+fn secret_impl(name: &str) -> Result<Value> {
+    require_superuser("postllm.secret")?;
+    catalog::secret(name)
+}
+
+fn secret_set_impl(name: &str, value: &str, description: Option<&str>) -> Result<Value> {
+    require_superuser("postllm.secret_set")?;
+    catalog::secret_set(name, value, description)
+}
+
+fn secret_delete_impl(name: &str) -> Result<Value> {
+    require_superuser("postllm.secret_delete")?;
+    catalog::secret_delete(name)
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "the SQL surface intentionally exposes a flat profile_set(...) API aligned with configure(...)"
@@ -1765,6 +1839,7 @@ fn profile_set_impl(
     base_url: Option<&str>,
     model: Option<&str>,
     embedding_model: Option<&str>,
+    api_key_secret: Option<&str>,
     timeout_ms: Option<i32>,
     max_retries: Option<i32>,
     retry_backoff_ms: Option<i32>,
@@ -1780,6 +1855,7 @@ fn profile_set_impl(
         model,
         embedding_model,
         None,
+        api_key_secret,
         timeout_ms,
         max_retries,
         retry_backoff_ms,
@@ -1800,6 +1876,24 @@ fn profile_apply_impl(name: &str) -> Result<Value> {
 
 fn profile_delete_impl(name: &str) -> Result<Value> {
     catalog::profile_delete(name)
+}
+
+fn require_superuser(function_name: &str) -> Result<()> {
+    let is_superuser = Spi::get_one::<bool>(
+        "SELECT COALESCE(
+            (SELECT rolsuper FROM pg_roles WHERE rolname = current_user),
+            false
+        )",
+    )?
+    .unwrap_or(false);
+
+    if is_superuser {
+        Ok(())
+    } else {
+        Err(Error::Config(format!(
+            "{function_name}(...) requires a PostgreSQL superuser; fix: run it as a superuser and let application roles use postllm.configure(api_key_secret => ...) or postllm.profile_apply(...)"
+        )))
+    }
 }
 
 fn model_aliases_impl() -> Result<Value> {
@@ -5699,6 +5793,8 @@ mod tests {
                 "max_retries": 2,
                 "retry_backoff_ms": 250,
                 "has_api_key": false,
+                "api_key_source": "none",
+                "api_key_secret": null,
                 "candle_cache_dir": null,
                 "candle_offline": false,
                 "candle_device": "auto",
@@ -5758,6 +5854,7 @@ mod tests {
     #[pg_test]
     fn sql_profiles_and_model_aliases_should_default_to_empty_arrays() {
         assert_eq!(sql_json("SELECT postllm.profiles()"), json!([]));
+        assert_eq!(sql_json("SELECT postllm.secrets()"), json!([]));
         assert_eq!(sql_json("SELECT postllm.model_aliases()"), json!([]));
     }
 
@@ -5805,6 +5902,8 @@ mod tests {
         assert_eq!(applied["timeout_ms"], 9000);
         assert_eq!(applied["max_retries"], 1);
         assert_eq!(applied["retry_backoff_ms"], 50);
+        assert_eq!(applied["api_key_source"], "none");
+        assert_eq!(applied["api_key_secret"], Value::Null);
     }
 
     #[pg_test]
@@ -5840,6 +5939,9 @@ mod tests {
             applied["embedding_model"],
             "sentence-transformers/paraphrase-MiniLM-L3-v2"
         );
+        assert_eq!(applied["has_api_key"], false);
+        assert_eq!(applied["api_key_source"], "none");
+        assert_eq!(applied["api_key_secret"], Value::Null);
         assert_eq!(applied["candle_offline"], false);
         assert_eq!(applied["candle_device"], "auto");
         assert_eq!(applied["candle_max_input_tokens"], 0);
@@ -5865,7 +5967,69 @@ mod tests {
         assert_eq!(deleted_alias["lane"], "generation");
         assert_eq!(deleted_alias["deleted"], true);
         assert_eq!(sql_json("SELECT postllm.profiles()"), json!([]));
+        assert_eq!(sql_json("SELECT postllm.secrets()"), json!([]));
         assert_eq!(sql_json("SELECT postllm.model_aliases()"), json!([]));
+    }
+
+    #[pg_test]
+    fn sql_secret_set_should_configure_session_when_key_is_available() {
+        if env::var("POSTLLM_SECRET_KEY").is_err() {
+            return;
+        }
+
+        let stored = sql_json(
+            "SELECT postllm.secret_set(
+                name => 'openai-prod',
+                value => 'sk-test-secret',
+                description => 'Production OpenAI key'
+            )",
+        );
+        let fetched = sql_json("SELECT postllm.secret('openai-prod')");
+        let configured = sql_json(
+            "SELECT postllm.configure(
+                runtime => 'openai',
+                api_key_secret => 'openai-prod'
+            )",
+        );
+
+        assert_eq!(stored["name"], "openai-prod");
+        assert_eq!(stored["description"], "Production OpenAI key");
+        assert_eq!(stored["algorithm"], "chacha20poly1305-v1");
+        assert_eq!(fetched["name"], "openai-prod");
+        assert_eq!(configured["has_api_key"], true);
+        assert_eq!(configured["api_key_source"], "secret");
+        assert_eq!(configured["api_key_secret"], "openai-prod");
+    }
+
+    #[pg_test]
+    fn sql_profile_apply_should_resolve_stored_secret_when_available() {
+        if env::var("POSTLLM_SECRET_KEY").is_err() {
+            return;
+        }
+
+        drop(sql_json(
+            "SELECT postllm.secret_set(
+                name => 'staging-key',
+                value => 'sk-staging-secret',
+                description => 'Staging key'
+            )",
+        ));
+        let stored_profile = sql_json(
+            "SELECT postllm.profile_set(
+                name => 'hosted-secret-profile',
+                runtime => 'openai',
+                base_url => 'http://127.0.0.1:9090/v1/chat/completions',
+                model => 'staging-chat',
+                api_key_secret => 'staging-key'
+            )",
+        );
+        let applied = sql_json("SELECT postllm.profile_apply('hosted-secret-profile')");
+
+        assert_eq!(stored_profile["config"]["api_key_secret"], "staging-key");
+        assert_eq!(applied["profile"], "hosted-secret-profile");
+        assert_eq!(applied["has_api_key"], true);
+        assert_eq!(applied["api_key_source"], "secret");
+        assert_eq!(applied["api_key_secret"], "staging-key");
     }
 
     #[pg_test]
@@ -7418,6 +7582,18 @@ mod tests {
         let configured = sql_json("SELECT postllm.configure(api_key => '   ')");
 
         assert_eq!(configured["has_api_key"], false);
+        assert_eq!(configured["api_key_source"], "none");
+        assert_eq!(configured["api_key_secret"], Value::Null);
+    }
+
+    #[pg_test]
+    #[should_panic(
+        expected = "postllm received an invalid argument: argument 'api_key_secret' must not be combined with api_key in the same configure(...) call; fix: pass either api_key => '...' for a direct session secret or api_key_secret => '...' for a named stored secret"
+    )]
+    fn sql_configure_should_reject_api_key_plus_secret() {
+        drop(Spi::get_one::<JsonB>(
+            "SELECT postllm.configure(api_key => 'sk-inline', api_key_secret => 'named-secret')",
+        ));
     }
 
     #[pg_test]

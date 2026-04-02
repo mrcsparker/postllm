@@ -14,6 +14,10 @@ The extension is built around a native schema-scoped API:
 - `postllm.profile_set(name text, ...) -> jsonb`
 - `postllm.profile_apply(name text) -> jsonb`
 - `postllm.profile_delete(name text) -> jsonb`
+- `postllm.secrets() -> jsonb`
+- `postllm.secret(name text) -> jsonb`
+- `postllm.secret_set(name text, value text, description text default null) -> jsonb`
+- `postllm.secret_delete(name text) -> jsonb`
 - `postllm.model_aliases() -> jsonb`
 - `postllm.model_alias(alias text, lane text) -> jsonb`
 - `postllm.model_alias_set(alias text, lane text, model text, description text default null) -> jsonb`
@@ -124,6 +128,7 @@ The extension exposes `PostgreSQL` settings that work naturally with `SET`, `ALT
 - `postllm.model`
 - `postllm.embedding_model`
 - `postllm.api_key`
+- `postllm.api_key_secret`
 - `postllm.timeout_ms`
 - `postllm.max_retries`
 - `postllm.retry_backoff_ms`
@@ -151,7 +156,31 @@ SELECT postllm.configure(
 );
 ```
 
-For reusable non-secret environments, `postllm.profile_set(...)` stores named configuration profiles in the database and `postllm.profile_apply(...)` reapplies them to the current session. Profile application resets managed non-secret settings back to extension defaults before applying the stored profile, so switching from a local Candle setup to a hosted setup does not leak stale runtime settings. Profiles intentionally do not store `postllm.api_key`.
+For direct provider credentials, `postllm.api_key` still works as the low-friction escape hatch. For a safer operator flow, set the server environment variable `POSTLLM_SECRET_KEY` and store provider credentials with `postllm.secret_set(...)`. Secret rows are encrypted in `postllm.provider_secrets`, the SQL secret-management functions only return metadata, and those management functions require a PostgreSQL superuser.
+
+Named profiles now store ordinary settings plus optional `api_key_secret` references. `postllm.profile_apply(...)` resets managed settings back to extension defaults before applying the stored profile, so switching from a local Candle setup to a hosted setup does not leak stale runtime settings. Profiles intentionally do not store raw `postllm.api_key` values.
+
+The intended workflow is:
+
+```sql
+SELECT postllm.secret_set(
+    name => 'openai-prod',
+    value => 'sk-live-redacted',
+    description => 'Primary hosted provider key'
+);
+
+SELECT postllm.profile_set(
+    name => 'hosted-prod',
+    runtime => 'openai',
+    base_url => 'https://api.openai.com/v1/chat/completions',
+    model => 'gpt-4.1-mini',
+    api_key_secret => 'openai-prod'
+);
+
+SELECT postllm.profile_apply('hosted-prod');
+```
+
+Application roles can then use `postllm.profile_apply(...)` or `postllm.configure(api_key_secret => 'openai-prod')` without learning the raw credential. `postllm.settings()` reports `has_api_key`, `api_key_source`, and `api_key_secret`, but never returns the secret itself.
 
 For reusable model shorthands, `postllm.model_alias_set(...)` stores lane-aware generation and embedding aliases. Once defined, aliases resolve automatically through `postllm.capabilities()`, `postllm.chat(...)`, `postllm.complete(...)`, `postllm.embed(...)`, `postllm.embedding_model_info(...)`, rerank helpers, and local model lifecycle commands.
 

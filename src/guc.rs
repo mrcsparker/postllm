@@ -18,6 +18,7 @@ pub(crate) const DEFAULT_EMBEDDING_MODEL: &str = "sentence-transformers/paraphra
 pub(crate) const DEFAULT_TIMEOUT_MS: i32 = 30_000;
 pub(crate) const DEFAULT_MAX_RETRIES: i32 = 2;
 pub(crate) const DEFAULT_RETRY_BACKOFF_MS: i32 = 250;
+pub(crate) const DEFAULT_API_KEY_SECRET: &str = "";
 pub(crate) const DEFAULT_CANDLE_DEVICE: &str = CandleDevice::AUTO;
 pub(crate) const DEFAULT_CANDLE_MAX_INPUT_TOKENS: i32 = 0;
 pub(crate) const DEFAULT_CANDLE_MAX_CONCURRENCY: i32 = 0;
@@ -31,6 +32,8 @@ static POSTLLM_MODEL: GucSetting<Option<CString>> =
 static POSTLLM_EMBEDDING_MODEL: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(c"sentence-transformers/paraphrase-MiniLM-L3-v2"));
 static POSTLLM_API_KEY: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
+static POSTLLM_API_KEY_SECRET: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
 static POSTLLM_TIMEOUT_MS: GucSetting<i32> = GucSetting::<i32>::new(30_000);
 static POSTLLM_MAX_RETRIES: GucSetting<i32> = GucSetting::<i32>::new(2);
 static POSTLLM_RETRY_BACKOFF_MS: GucSetting<i32> = GucSetting::<i32>::new(250);
@@ -49,6 +52,9 @@ pub(crate) struct SessionOverrides {
     pub(crate) model: Option<String>,
     pub(crate) embedding_model: Option<String>,
     pub(crate) api_key: Option<String>,
+    pub(crate) api_key_secret: Option<String>,
+    pub(crate) clear_api_key: bool,
+    pub(crate) clear_api_key_secret: bool,
     pub(crate) timeout_ms: Option<i32>,
     pub(crate) max_retries: Option<i32>,
     pub(crate) retry_backoff_ms: Option<i32>,
@@ -70,6 +76,7 @@ impl SessionOverrides {
         model: Option<&str>,
         embedding_model: Option<&str>,
         api_key: Option<&str>,
+        api_key_secret: Option<&str>,
         timeout_ms: Option<i32>,
         max_retries: Option<i32>,
         retry_backoff_ms: Option<i32>,
@@ -80,11 +87,34 @@ impl SessionOverrides {
         candle_max_input_tokens: Option<i32>,
         candle_max_concurrency: Option<i32>,
     ) -> Result<Self> {
+        let api_key = api_key.map(|value| value.trim().to_owned());
+        let api_key_secret = api_key_secret.map(|value| value.trim().to_owned());
+        let direct_api_key = api_key
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        let named_api_key_secret = api_key_secret
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+
+        if direct_api_key.is_some() && named_api_key_secret.is_some() {
+            return Err(Error::invalid_argument(
+                "api_key_secret",
+                "must not be combined with api_key in the same configure(...) call",
+                "pass either api_key => '...' for a direct session secret or api_key_secret => '...' for a named stored secret",
+            ));
+        }
+
         Ok(Self {
             base_url: sanitize_non_blank_string("base_url", base_url)?,
             model: sanitize_non_blank_string("model", model)?,
             embedding_model: sanitize_non_blank_string("embedding_model", embedding_model)?,
-            api_key: api_key.map(|value| value.trim().to_owned()),
+            api_key: direct_api_key,
+            api_key_secret: named_api_key_secret,
+            clear_api_key: api_key.as_ref().is_some_and(String::is_empty)
+                || api_key_secret.is_some(),
+            clear_api_key_secret: api_key.is_some() || api_key_secret.is_some(),
             timeout_ms: sanitize_positive_int(
                 "timeout_ms",
                 timeout_ms,
@@ -131,6 +161,9 @@ impl SessionOverrides {
             model: parse_profile_string(object, "model", true)?,
             embedding_model: parse_profile_string(object, "embedding_model", true)?,
             api_key: None,
+            api_key_secret: parse_profile_string(object, "api_key_secret", true)?,
+            clear_api_key: false,
+            clear_api_key_secret: false,
             timeout_ms: parse_profile_int(object, "timeout_ms", false)?,
             max_retries: parse_profile_int(object, "max_retries", true)?,
             retry_backoff_ms: parse_profile_int(object, "retry_backoff_ms", true)?,
@@ -158,6 +191,11 @@ impl SessionOverrides {
             &mut object,
             "embedding_model",
             self.embedding_model.as_deref(),
+        );
+        insert_optional_string(
+            &mut object,
+            "api_key_secret",
+            self.api_key_secret.as_deref(),
         );
         insert_optional_i32(&mut object, "timeout_ms", self.timeout_ms);
         insert_optional_i32(&mut object, "max_retries", self.max_retries);
@@ -227,6 +265,15 @@ fn register_core_runtime_gucs() {
         &POSTLLM_EMBEDDING_MODEL,
         GucContext::Userset,
         GucFlags::default(),
+    );
+
+    GucRegistry::define_string_guc(
+        c"postllm.api_key_secret",
+        c"Named provider secret used to resolve postllm.api_key for the current session.",
+        c"Metadata-only secret reference set by postllm.configure(api_key_secret => ...) or postllm.profile_apply(...); the referenced secret is stored encrypted in postllm.provider_secrets.",
+        &POSTLLM_API_KEY_SECRET,
+        GucContext::Suset,
+        GucFlags::NO_SHOW_ALL | GucFlags::SUPERUSER_ONLY,
     );
 }
 
@@ -615,6 +662,8 @@ pub(crate) fn snapshot() -> Value {
         "max_retries": POSTLLM_MAX_RETRIES.get(),
         "retry_backoff_ms": POSTLLM_RETRY_BACKOFF_MS.get(),
         "has_api_key": string_setting(&POSTLLM_API_KEY).is_some(),
+        "api_key_source": api_key_source(),
+        "api_key_secret": string_setting(&POSTLLM_API_KEY_SECRET),
         "candle_cache_dir": string_setting(&POSTLLM_CANDLE_CACHE_DIR),
         "candle_offline": POSTLLM_CANDLE_OFFLINE.get(),
         "candle_device": string_setting(&POSTLLM_CANDLE_DEVICE),
@@ -650,6 +699,7 @@ pub(crate) fn configure_session(
     model: Option<&str>,
     embedding_model: Option<&str>,
     api_key: Option<&str>,
+    api_key_secret: Option<&str>,
     timeout_ms: Option<i32>,
     max_retries: Option<i32>,
     retry_backoff_ms: Option<i32>,
@@ -665,6 +715,7 @@ pub(crate) fn configure_session(
         model,
         embedding_model,
         api_key,
+        api_key_secret,
         timeout_ms,
         max_retries,
         retry_backoff_ms,
@@ -707,8 +758,22 @@ fn apply_session_overrides_internal(overrides: &SessionOverrides) -> Result<Valu
         set_session_string("postllm.embedding_model", embedding_model)?;
     }
 
+    if overrides.clear_api_key {
+        set_session_string("postllm.api_key", "")?;
+    }
+
+    if overrides.clear_api_key_secret {
+        set_session_string("postllm.api_key_secret", "")?;
+    }
+
     if let Some(api_key) = overrides.api_key.as_deref() {
         set_session_string("postllm.api_key", api_key)?;
+    }
+
+    if let Some(api_key_secret) = overrides.api_key_secret.as_deref() {
+        let resolved_api_key = crate::catalog::secret_value(api_key_secret)?;
+        set_session_string("postllm.api_key", &resolved_api_key)?;
+        set_session_string("postllm.api_key_secret", api_key_secret)?;
     }
 
     if let Some(timeout_ms) = overrides.timeout_ms {
@@ -760,6 +825,8 @@ fn reset_profile_managed_settings_to_defaults() -> Result<()> {
     set_session_string("postllm.runtime", DEFAULT_RUNTIME)?;
     set_session_string("postllm.model", DEFAULT_MODEL)?;
     set_session_string("postllm.embedding_model", DEFAULT_EMBEDDING_MODEL)?;
+    set_session_string("postllm.api_key", "")?;
+    set_session_string("postllm.api_key_secret", DEFAULT_API_KEY_SECRET)?;
     set_session_string("postllm.timeout_ms", &DEFAULT_TIMEOUT_MS.to_string())?;
     set_session_string("postllm.max_retries", &DEFAULT_MAX_RETRIES.to_string())?;
     set_session_string(
@@ -879,10 +946,11 @@ fn sanitize_candle_device(value: Option<&str>) -> Result<Option<String>> {
 }
 
 fn validate_profile_keys(object: &Map<String, Value>) -> Result<()> {
-    const ALLOWED_KEYS: [&str; 11] = [
+    const ALLOWED_KEYS: [&str; 12] = [
         "base_url",
         "model",
         "embedding_model",
+        "api_key_secret",
         "timeout_ms",
         "max_retries",
         "retry_backoff_ms",
@@ -1002,6 +1070,16 @@ fn string_setting(setting: &'static GucSetting<Option<CString>>) -> Option<Strin
         .get()
         .map(|value| value.to_string_lossy().into_owned())
         .and_then(|value| trimmed_or_none(&value).map(str::to_owned))
+}
+
+fn api_key_source() -> &'static str {
+    if string_setting(&POSTLLM_API_KEY_SECRET).is_some() {
+        "secret"
+    } else if string_setting(&POSTLLM_API_KEY).is_some() {
+        "direct"
+    } else {
+        "none"
+    }
 }
 
 fn require_non_blank<'value>(name: &str, value: &'value str) -> Result<&'value str> {

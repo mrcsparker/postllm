@@ -5,6 +5,7 @@
 
 use crate::error::{Error, Result};
 use crate::guc::SessionOverrides;
+use crate::secrets::StoredSecret;
 use pgrx::JsonB;
 use pgrx::datum::DatumWithOid;
 use pgrx::spi::Spi;
@@ -192,6 +193,123 @@ pub(crate) fn profile_delete(name: &str) -> Result<Value> {
     }
 }
 
+/// Returns all stored provider secret metadata as a JSON array.
+pub(crate) fn secrets() -> Result<Value> {
+    json_query(
+        "SELECT COALESCE(
+            jsonb_agg(
+                jsonb_build_object(
+                    'name', name,
+                    'description', description,
+                    'algorithm', algorithm,
+                    'key_fingerprint', key_fingerprint,
+                    'created_at', to_jsonb(created_at),
+                    'updated_at', to_jsonb(updated_at)
+                )
+                ORDER BY name
+            ),
+            '[]'::jsonb
+        )
+        FROM postllm.provider_secrets",
+        &[],
+    )
+}
+
+/// Returns one stored provider secret metadata record.
+pub(crate) fn secret(name: &str) -> Result<Value> {
+    let name = require_non_blank("name", name)?;
+    fetch_secret_record(name)
+}
+
+/// Stores or updates an encrypted provider secret.
+pub(crate) fn secret_set(name: &str, value: &str, description: Option<&str>) -> Result<Value> {
+    let name = require_non_blank("name", name)?;
+    let value = require_non_blank("value", value)?;
+    let description = trimmed_or_none_option(description);
+    let encrypted = crate::secrets::encrypt_secret(name, value)?;
+
+    json_query(
+        "WITH saved AS (
+            INSERT INTO postllm.provider_secrets (
+                name,
+                description,
+                algorithm,
+                nonce,
+                ciphertext,
+                key_fingerprint
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (name) DO UPDATE
+            SET description = EXCLUDED.description,
+                algorithm = EXCLUDED.algorithm,
+                nonce = EXCLUDED.nonce,
+                ciphertext = EXCLUDED.ciphertext,
+                key_fingerprint = EXCLUDED.key_fingerprint,
+                updated_at = clock_timestamp()
+            RETURNING name, description, algorithm, key_fingerprint, created_at, updated_at
+        )
+        SELECT jsonb_build_object(
+            'name', name,
+            'description', description,
+            'algorithm', algorithm,
+            'key_fingerprint', key_fingerprint,
+            'created_at', to_jsonb(created_at),
+            'updated_at', to_jsonb(updated_at)
+        )
+        FROM saved",
+        &[
+            DatumWithOid::from(name),
+            DatumWithOid::from(description.as_deref()),
+            DatumWithOid::from(encrypted.algorithm.as_str()),
+            DatumWithOid::from(encrypted.nonce.as_str()),
+            DatumWithOid::from(encrypted.ciphertext.as_str()),
+            DatumWithOid::from(encrypted.key_fingerprint.as_str()),
+        ],
+    )
+}
+
+/// Deletes a stored provider secret.
+pub(crate) fn secret_delete(name: &str) -> Result<Value> {
+    let name = require_non_blank("name", name)?;
+
+    let deleted = json_query(
+        "WITH deleted AS (
+            DELETE FROM postllm.provider_secrets
+            WHERE name = $1
+            RETURNING name, description, algorithm, key_fingerprint, created_at, updated_at
+        )
+        SELECT COALESCE(
+            (
+                SELECT jsonb_build_object(
+                    'name', name,
+                    'description', description,
+                    'algorithm', algorithm,
+                    'key_fingerprint', key_fingerprint,
+                    'created_at', to_jsonb(created_at),
+                    'updated_at', to_jsonb(updated_at),
+                    'deleted', true
+                )
+                FROM deleted
+            ),
+            'null'::jsonb
+        )",
+        &[DatumWithOid::from(name)],
+    )?;
+
+    if deleted.is_null() {
+        Err(unknown_secret("name", name))
+    } else {
+        Ok(deleted)
+    }
+}
+
+/// Resolves and decrypts a stored provider secret by name.
+pub(crate) fn secret_value(name: &str) -> Result<String> {
+    let name = require_non_blank("api_key_secret", name)?;
+    let stored = fetch_secret_payload(name)?;
+    crate::secrets::decrypt_secret(name, &stored)
+}
+
 /// Returns all model aliases as a JSON array.
 pub(crate) fn model_aliases() -> Result<Value> {
     json_query(
@@ -320,6 +438,73 @@ fn fetch_profile_record(name: &str) -> Result<Value> {
     }
 }
 
+fn fetch_secret_record(name: &str) -> Result<Value> {
+    let secret = json_query(
+        "SELECT COALESCE(
+            (
+                SELECT jsonb_build_object(
+                    'name', name,
+                    'description', description,
+                    'algorithm', algorithm,
+                    'key_fingerprint', key_fingerprint,
+                    'created_at', to_jsonb(created_at),
+                    'updated_at', to_jsonb(updated_at)
+                )
+                FROM postllm.provider_secrets
+                WHERE name = $1
+            ),
+            'null'::jsonb
+        )",
+        &[DatumWithOid::from(name)],
+    )?;
+
+    if secret.is_null() {
+        Err(unknown_secret("name", name))
+    } else {
+        Ok(secret)
+    }
+}
+
+fn fetch_secret_payload(name: &str) -> Result<StoredSecret> {
+    Spi::connect(|client| {
+        let table = client.select(
+            "SELECT algorithm, nonce, ciphertext, key_fingerprint
+             FROM postllm.provider_secrets
+             WHERE name = $1",
+            None,
+            &[DatumWithOid::from(name)],
+        )?;
+        if table.is_empty() {
+            return Err(unknown_secret("api_key_secret", name).into());
+        }
+        let row = table.first();
+
+        let algorithm = row.get_by_name::<String, _>("algorithm")?.ok_or_else(|| {
+            Error::Config(format!("stored secret '{name}' is missing its algorithm"))
+        })?;
+        let nonce = row
+            .get_by_name::<String, _>("nonce")?
+            .ok_or_else(|| Error::Config(format!("stored secret '{name}' is missing its nonce")))?;
+        let ciphertext = row.get_by_name::<String, _>("ciphertext")?.ok_or_else(|| {
+            Error::Config(format!("stored secret '{name}' is missing its ciphertext"))
+        })?;
+        let key_fingerprint = row
+            .get_by_name::<String, _>("key_fingerprint")?
+            .ok_or_else(|| {
+                Error::Config(format!(
+                    "stored secret '{name}' is missing its key fingerprint"
+                ))
+            })?;
+
+        Ok(StoredSecret {
+            algorithm,
+            nonce,
+            ciphertext,
+            key_fingerprint,
+        })
+    })
+}
+
 fn fetch_model_alias_record(alias: &str, lane: ModelAliasLane) -> Result<Value> {
     let alias_record = json_query(
         "SELECT COALESCE(
@@ -358,6 +543,14 @@ fn unknown_profile(name: &str) -> Error {
         "name",
         format!("refers to unknown profile '{name}'"),
         "create it with postllm.profile_set(...) or choose one from postllm.profiles()",
+    )
+}
+
+fn unknown_secret(argument: &str, name: &str) -> Error {
+    Error::invalid_argument(
+        argument,
+        format!("refers to unknown provider secret '{name}'"),
+        "create it with postllm.secret_set(...) or choose one from postllm.secrets()",
     )
 }
 
