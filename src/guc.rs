@@ -23,6 +23,28 @@ pub(crate) const DEFAULT_API_KEY_SECRET: &str = "";
 pub(crate) const DEFAULT_CANDLE_DEVICE: &str = CandleDevice::AUTO;
 pub(crate) const DEFAULT_CANDLE_MAX_INPUT_TOKENS: i32 = 0;
 pub(crate) const DEFAULT_CANDLE_MAX_CONCURRENCY: i32 = 0;
+const PROFILE_MANAGED_STRING_DEFAULTS: [(&str, &str); 7] = [
+    ("postllm.base_url", DEFAULT_BASE_URL),
+    ("postllm.runtime", DEFAULT_RUNTIME),
+    ("postllm.model", DEFAULT_MODEL),
+    ("postllm.embedding_model", DEFAULT_EMBEDDING_MODEL),
+    ("postllm.api_key", ""),
+    ("postllm.api_key_secret", DEFAULT_API_KEY_SECRET),
+    ("postllm.candle_device", DEFAULT_CANDLE_DEVICE),
+];
+const PROFILE_MANAGED_INT_DEFAULTS: [(&str, i32); 5] = [
+    ("postllm.timeout_ms", DEFAULT_TIMEOUT_MS),
+    ("postllm.max_retries", DEFAULT_MAX_RETRIES),
+    ("postllm.retry_backoff_ms", DEFAULT_RETRY_BACKOFF_MS),
+    (
+        "postllm.candle_max_input_tokens",
+        DEFAULT_CANDLE_MAX_INPUT_TOKENS,
+    ),
+    (
+        "postllm.candle_max_concurrency",
+        DEFAULT_CANDLE_MAX_CONCURRENCY,
+    ),
+];
 
 static POSTLLM_BASE_URL: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(c"http://127.0.0.1:11434/v1/chat/completions"));
@@ -49,6 +71,44 @@ static POSTLLM_CANDLE_DEVICE: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(c"auto"));
 static POSTLLM_CANDLE_MAX_INPUT_TOKENS: GucSetting<i32> = GucSetting::<i32>::new(0);
 static POSTLLM_CANDLE_MAX_CONCURRENCY: GucSetting<i32> = GucSetting::<i32>::new(0);
+
+/// Fully resolved setting inputs shared by all request-setting builders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedSettingInputs {
+    base_url: Option<String>,
+    api_key: Option<String>,
+    timeout_ms: u64,
+    max_retries: u32,
+    retry_backoff_ms: u64,
+    http_allowed_hosts: Vec<String>,
+    http_allowed_providers: Vec<String>,
+    candle_cache_dir: Option<String>,
+    candle_offline: bool,
+    candle_device: CandleDevice,
+    candle_max_input_tokens: u32,
+    candle_max_concurrency: u32,
+}
+
+impl ResolvedSettingInputs {
+    fn into_settings(self, runtime: Runtime, model: String) -> Settings {
+        Settings {
+            runtime,
+            model,
+            base_url: self.base_url,
+            api_key: self.api_key,
+            timeout_ms: self.timeout_ms,
+            max_retries: self.max_retries,
+            retry_backoff_ms: self.retry_backoff_ms,
+            http_allowed_hosts: self.http_allowed_hosts,
+            http_allowed_providers: self.http_allowed_providers,
+            candle_cache_dir: self.candle_cache_dir,
+            candle_offline: self.candle_offline,
+            candle_device: self.candle_device,
+            candle_max_input_tokens: self.candle_max_input_tokens,
+            candle_max_concurrency: self.candle_max_concurrency,
+        }
+    }
+}
 
 /// Validated session-local `postllm` overrides.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -397,89 +457,12 @@ fn register_candle_runtime_gucs() {
 
 /// Resolves the current backend settings, optionally overriding the model for one request.
 pub(crate) fn resolve(model_override: Option<&str>) -> Result<Settings> {
-    let timeout_ms = POSTLLM_TIMEOUT_MS.get();
-    if timeout_ms <= 0 {
-        return Err(Error::invalid_setting(
-            "postllm.timeout_ms",
-            "must be greater than zero",
-            "SET postllm.timeout_ms = 30000 or another positive integer",
-        ));
-    }
-
-    let timeout_ms = u64::try_from(timeout_ms).map_err(|_| {
-        Error::invalid_setting(
-            "postllm.timeout_ms",
-            "must be representable as a u64",
-            "SET postllm.timeout_ms = 30000 or another positive integer",
-        )
-    })?;
-    let max_retries = POSTLLM_MAX_RETRIES.get();
-    let max_retries = u32::try_from(max_retries).map_err(|_| {
-        Error::invalid_setting(
-            "postllm.max_retries",
-            "must be representable as a u32",
-            "SET postllm.max_retries = 2 or another non-negative integer",
-        )
-    })?;
-    let retry_backoff_ms = POSTLLM_RETRY_BACKOFF_MS.get();
-    let retry_backoff_ms = u64::try_from(retry_backoff_ms).map_err(|_| {
-        Error::invalid_setting(
-            "postllm.retry_backoff_ms",
-            "must be representable as a u64",
-            "SET postllm.retry_backoff_ms = 250 or another non-negative integer",
-        )
-    })?;
-    let http_allowed_hosts = resolve_http_allowed_hosts()?;
-    let http_allowed_providers = resolve_http_allowed_providers()?;
-    let candle_max_input_tokens = u32::try_from(POSTLLM_CANDLE_MAX_INPUT_TOKENS.get()).map_err(|_| {
-        Error::invalid_setting(
-            "postllm.candle_max_input_tokens",
-            "must be representable as a u32",
-            "SET postllm.candle_max_input_tokens = 0 to disable the cap or another non-negative integer",
-        )
-    })?;
-    let candle_max_concurrency = u32::try_from(POSTLLM_CANDLE_MAX_CONCURRENCY.get()).map_err(|_| {
-        Error::invalid_setting(
-            "postllm.candle_max_concurrency",
-            "must be representable as a u32",
-            "SET postllm.candle_max_concurrency = 0 to disable the cap or another non-negative integer",
-        )
-    })?;
-    let candle_device = resolve_candle_device()?;
-
-    let runtime_value = required_setting("postllm.runtime", string_setting(&POSTLLM_RUNTIME))?;
-    let runtime = Runtime::parse(&runtime_value).map_err(|_| {
-        Error::invalid_setting(
-            "postllm.runtime",
-            format!(
-                "must be '{}' or '{}', got '{}'",
-                Runtime::OPENAI,
-                Runtime::CANDLE,
-                runtime_value.trim().to_ascii_lowercase(),
-            ),
-            "SET postllm.runtime = 'openai' or 'candle'",
-        )
-    })?;
+    let inputs = resolve_setting_inputs()?;
+    let runtime = resolve_runtime()?;
     permissions::ensure_runtime_allowed(runtime)?;
     let model = resolve_generation_model(model_override)?;
     ensure_active_privileged_settings_allowed()?;
-
-    let settings = Settings {
-        runtime,
-        model,
-        base_url: string_setting(&POSTLLM_BASE_URL),
-        api_key: string_setting(&POSTLLM_API_KEY),
-        timeout_ms,
-        max_retries,
-        retry_backoff_ms,
-        http_allowed_hosts,
-        http_allowed_providers,
-        candle_cache_dir: string_setting(&POSTLLM_CANDLE_CACHE_DIR),
-        candle_offline: POSTLLM_CANDLE_OFFLINE.get(),
-        candle_device,
-        candle_max_input_tokens,
-        candle_max_concurrency,
-    };
+    let settings = inputs.into_settings(runtime, model);
 
     crate::client::enforce_http_endpoint_policy(&settings)?;
 
@@ -488,99 +471,12 @@ pub(crate) fn resolve(model_override: Option<&str>) -> Result<Settings> {
 
 /// Resolves settings for reranking requests.
 pub(crate) fn resolve_rerank(model_override: Option<&str>) -> Result<Settings> {
-    let timeout_ms = POSTLLM_TIMEOUT_MS.get();
-    if timeout_ms <= 0 {
-        return Err(Error::invalid_setting(
-            "postllm.timeout_ms",
-            "must be greater than zero",
-            "SET postllm.timeout_ms = 30000 or another positive integer",
-        ));
-    }
-
-    let timeout_ms = u64::try_from(timeout_ms).map_err(|_| {
-        Error::invalid_setting(
-            "postllm.timeout_ms",
-            "must be representable as a u64",
-            "SET postllm.timeout_ms = 30000 or another positive integer",
-        )
-    })?;
-    let max_retries = POSTLLM_MAX_RETRIES.get();
-    let max_retries = u32::try_from(max_retries).map_err(|_| {
-        Error::invalid_setting(
-            "postllm.max_retries",
-            "must be representable as a u32",
-            "SET postllm.max_retries = 2 or another non-negative integer",
-        )
-    })?;
-    let retry_backoff_ms = POSTLLM_RETRY_BACKOFF_MS.get();
-    let retry_backoff_ms = u64::try_from(retry_backoff_ms).map_err(|_| {
-        Error::invalid_setting(
-            "postllm.retry_backoff_ms",
-            "must be representable as a u64",
-            "SET postllm.retry_backoff_ms = 250 or another non-negative integer",
-        )
-    })?;
-    let http_allowed_hosts = resolve_http_allowed_hosts()?;
-    let http_allowed_providers = resolve_http_allowed_providers()?;
-    let candle_max_input_tokens = u32::try_from(POSTLLM_CANDLE_MAX_INPUT_TOKENS.get()).map_err(|_| {
-        Error::invalid_setting(
-            "postllm.candle_max_input_tokens",
-            "must be representable as a u32",
-            "SET postllm.candle_max_input_tokens = 0 to disable the cap or another non-negative integer",
-        )
-    })?;
-    let candle_max_concurrency = u32::try_from(POSTLLM_CANDLE_MAX_CONCURRENCY.get()).map_err(|_| {
-        Error::invalid_setting(
-            "postllm.candle_max_concurrency",
-            "must be representable as a u32",
-            "SET postllm.candle_max_concurrency = 0 to disable the cap or another non-negative integer",
-        )
-    })?;
-    let candle_device = resolve_candle_device()?;
-
-    let runtime_value = required_setting("postllm.runtime", string_setting(&POSTLLM_RUNTIME))?;
-    let runtime = Runtime::parse(&runtime_value).map_err(|_| {
-        Error::invalid_setting(
-            "postllm.runtime",
-            format!(
-                "must be '{}' or '{}', got '{}'",
-                Runtime::OPENAI,
-                Runtime::CANDLE,
-                runtime_value.trim().to_ascii_lowercase(),
-            ),
-            "SET postllm.runtime = 'openai' or 'candle'",
-        )
-    })?;
+    let inputs = resolve_setting_inputs()?;
+    let runtime = resolve_runtime()?;
     permissions::ensure_runtime_allowed(runtime)?;
-    let model = match runtime {
-        Runtime::OpenAi => match model_override.and_then(trimmed_or_none) {
-            Some(model) => {
-                let resolved = resolve_generation_alias(model)?;
-                permissions::ensure_generation_model_allowed(&resolved)?;
-                resolved
-            }
-            None => resolve_generation_model(None)?,
-        },
-        Runtime::Candle => resolve_embedding_model(model_override)?,
-    };
+    let model = resolve_rerank_model(runtime, model_override)?;
     ensure_active_privileged_settings_allowed()?;
-
-    let settings = Settings {
-        runtime,
-        model,
-        base_url: string_setting(&POSTLLM_BASE_URL),
-        api_key: string_setting(&POSTLLM_API_KEY),
-        timeout_ms,
-        max_retries,
-        retry_backoff_ms,
-        http_allowed_hosts,
-        http_allowed_providers,
-        candle_cache_dir: string_setting(&POSTLLM_CANDLE_CACHE_DIR),
-        candle_offline: POSTLLM_CANDLE_OFFLINE.get(),
-        candle_device,
-        candle_max_input_tokens,
-        candle_max_concurrency,
-    };
+    let settings = inputs.into_settings(runtime, model);
 
     crate::client::enforce_http_endpoint_policy(&settings)?;
 
@@ -589,72 +485,11 @@ pub(crate) fn resolve_rerank(model_override: Option<&str>) -> Result<Settings> {
 
 /// Resolves settings for local Candle embedding requests.
 pub(crate) fn resolve_embedding_settings(model_override: Option<&str>) -> Result<Settings> {
-    let timeout_ms = POSTLLM_TIMEOUT_MS.get();
-    if timeout_ms <= 0 {
-        return Err(Error::invalid_setting(
-            "postllm.timeout_ms",
-            "must be greater than zero",
-            "SET postllm.timeout_ms = 30000 or another positive integer",
-        ));
-    }
-
-    let timeout_ms = u64::try_from(timeout_ms).map_err(|_| {
-        Error::invalid_setting(
-            "postllm.timeout_ms",
-            "must be representable as a u64",
-            "SET postllm.timeout_ms = 30000 or another positive integer",
-        )
-    })?;
-    let max_retries = u32::try_from(POSTLLM_MAX_RETRIES.get()).map_err(|_| {
-        Error::invalid_setting(
-            "postllm.max_retries",
-            "must be representable as a u32",
-            "SET postllm.max_retries = 2 or another non-negative integer",
-        )
-    })?;
-    let retry_backoff_ms = u64::try_from(POSTLLM_RETRY_BACKOFF_MS.get()).map_err(|_| {
-        Error::invalid_setting(
-            "postllm.retry_backoff_ms",
-            "must be representable as a u64",
-            "SET postllm.retry_backoff_ms = 250 or another non-negative integer",
-        )
-    })?;
-    let http_allowed_hosts = resolve_http_allowed_hosts()?;
-    let http_allowed_providers = resolve_http_allowed_providers()?;
-    let candle_max_input_tokens = u32::try_from(POSTLLM_CANDLE_MAX_INPUT_TOKENS.get()).map_err(|_| {
-        Error::invalid_setting(
-            "postllm.candle_max_input_tokens",
-            "must be representable as a u32",
-            "SET postllm.candle_max_input_tokens = 0 to disable the cap or another non-negative integer",
-        )
-    })?;
-    let candle_max_concurrency = u32::try_from(POSTLLM_CANDLE_MAX_CONCURRENCY.get()).map_err(|_| {
-        Error::invalid_setting(
-            "postllm.candle_max_concurrency",
-            "must be representable as a u32",
-            "SET postllm.candle_max_concurrency = 0 to disable the cap or another non-negative integer",
-        )
-    })?;
-    let candle_device = resolve_candle_device()?;
-
+    let inputs = resolve_setting_inputs()?;
     ensure_active_privileged_settings_allowed()?;
+    let model = resolve_embedding_model(model_override)?;
 
-    Ok(Settings {
-        runtime: Runtime::Candle,
-        model: resolve_embedding_model(model_override)?,
-        base_url: string_setting(&POSTLLM_BASE_URL),
-        api_key: string_setting(&POSTLLM_API_KEY),
-        timeout_ms,
-        max_retries,
-        retry_backoff_ms,
-        http_allowed_hosts,
-        http_allowed_providers,
-        candle_cache_dir: string_setting(&POSTLLM_CANDLE_CACHE_DIR),
-        candle_offline: POSTLLM_CANDLE_OFFLINE.get(),
-        candle_device,
-        candle_max_input_tokens,
-        candle_max_concurrency,
-    })
+    Ok(inputs.into_settings(Runtime::Candle, model))
 }
 
 /// Resolves the current Candle embedding model, optionally overriding it for one request.
@@ -718,6 +553,113 @@ pub(crate) fn resolve_http_allowed_providers() -> Result<Vec<String>> {
         string_setting(&POSTLLM_HTTP_ALLOWED_PROVIDERS).as_deref(),
         "postllm.http_allowed_providers",
     )
+}
+
+fn resolve_setting_inputs() -> Result<ResolvedSettingInputs> {
+    Ok(ResolvedSettingInputs {
+        base_url: string_setting(&POSTLLM_BASE_URL),
+        api_key: string_setting(&POSTLLM_API_KEY),
+        timeout_ms: resolve_timeout_ms()?,
+        max_retries: resolve_max_retries()?,
+        retry_backoff_ms: resolve_retry_backoff_ms()?,
+        http_allowed_hosts: resolve_http_allowed_hosts()?,
+        http_allowed_providers: resolve_http_allowed_providers()?,
+        candle_cache_dir: string_setting(&POSTLLM_CANDLE_CACHE_DIR),
+        candle_offline: POSTLLM_CANDLE_OFFLINE.get(),
+        candle_device: resolve_candle_device()?,
+        candle_max_input_tokens: resolve_candle_max_input_tokens()?,
+        candle_max_concurrency: resolve_candle_max_concurrency()?,
+    })
+}
+
+fn resolve_runtime() -> Result<Runtime> {
+    let runtime_value = required_setting("postllm.runtime", string_setting(&POSTLLM_RUNTIME))?;
+
+    Runtime::parse(&runtime_value).map_err(|_| {
+        Error::invalid_setting(
+            "postllm.runtime",
+            format!(
+                "must be '{}' or '{}', got '{}'",
+                Runtime::OPENAI,
+                Runtime::CANDLE,
+                runtime_value.trim().to_ascii_lowercase(),
+            ),
+            "SET postllm.runtime = 'openai' or 'candle'",
+        )
+    })
+}
+
+fn resolve_rerank_model(runtime: Runtime, model_override: Option<&str>) -> Result<String> {
+    match runtime {
+        Runtime::OpenAi => match model_override.and_then(trimmed_or_none) {
+            Some(model) => {
+                let resolved = resolve_generation_alias(model)?;
+                permissions::ensure_generation_model_allowed(&resolved)?;
+                Ok(resolved)
+            }
+            None => resolve_generation_model(None),
+        },
+        Runtime::Candle => resolve_embedding_model(model_override),
+    }
+}
+
+fn resolve_timeout_ms() -> Result<u64> {
+    let timeout_ms = POSTLLM_TIMEOUT_MS.get();
+    if timeout_ms <= 0 {
+        return Err(Error::invalid_setting(
+            "postllm.timeout_ms",
+            "must be greater than zero",
+            "SET postllm.timeout_ms = 30000 or another positive integer",
+        ));
+    }
+
+    u64::try_from(timeout_ms).map_err(|_| {
+        Error::invalid_setting(
+            "postllm.timeout_ms",
+            "must be representable as a u64",
+            "SET postllm.timeout_ms = 30000 or another positive integer",
+        )
+    })
+}
+
+fn resolve_max_retries() -> Result<u32> {
+    u32::try_from(POSTLLM_MAX_RETRIES.get()).map_err(|_| {
+        Error::invalid_setting(
+            "postllm.max_retries",
+            "must be representable as a u32",
+            "SET postllm.max_retries = 2 or another non-negative integer",
+        )
+    })
+}
+
+fn resolve_retry_backoff_ms() -> Result<u64> {
+    u64::try_from(POSTLLM_RETRY_BACKOFF_MS.get()).map_err(|_| {
+        Error::invalid_setting(
+            "postllm.retry_backoff_ms",
+            "must be representable as a u64",
+            "SET postllm.retry_backoff_ms = 250 or another non-negative integer",
+        )
+    })
+}
+
+fn resolve_candle_max_input_tokens() -> Result<u32> {
+    u32::try_from(POSTLLM_CANDLE_MAX_INPUT_TOKENS.get()).map_err(|_| {
+        Error::invalid_setting(
+            "postllm.candle_max_input_tokens",
+            "must be representable as a u32",
+            "SET postllm.candle_max_input_tokens = 0 to disable the cap or another non-negative integer",
+        )
+    })
+}
+
+fn resolve_candle_max_concurrency() -> Result<u32> {
+    u32::try_from(POSTLLM_CANDLE_MAX_CONCURRENCY.get()).map_err(|_| {
+        Error::invalid_setting(
+            "postllm.candle_max_concurrency",
+            "must be representable as a u32",
+            "SET postllm.candle_max_concurrency = 0 to disable the cap or another non-negative integer",
+        )
+    })
 }
 
 /// Returns a JSON snapshot of the current backend-visible settings.
@@ -813,6 +755,15 @@ pub(crate) fn apply_profile_overrides(overrides: &SessionOverrides) -> Result<Va
 }
 
 fn apply_session_overrides_internal(overrides: &SessionOverrides) -> Result<Value> {
+    apply_runtime_identity_overrides(overrides)?;
+    apply_auth_overrides(overrides)?;
+    apply_hosted_runtime_overrides(overrides)?;
+    apply_candle_runtime_overrides(overrides)?;
+
+    Ok(snapshot())
+}
+
+fn apply_runtime_identity_overrides(overrides: &SessionOverrides) -> Result<()> {
     if let Some(base_url) = overrides.base_url.as_deref() {
         if base_url != DEFAULT_BASE_URL {
             permissions::ensure_setting_change_allowed("base_url")?;
@@ -837,6 +788,10 @@ fn apply_session_overrides_internal(overrides: &SessionOverrides) -> Result<Valu
         set_session_string("postllm.embedding_model", embedding_model)?;
     }
 
+    Ok(())
+}
+
+fn apply_auth_overrides(overrides: &SessionOverrides) -> Result<()> {
     if overrides.clear_api_key {
         set_session_string("postllm.api_key", "")?;
     }
@@ -857,27 +812,33 @@ fn apply_session_overrides_internal(overrides: &SessionOverrides) -> Result<Valu
         set_session_string("postllm.api_key_secret", api_key_secret)?;
     }
 
-    if let Some(timeout_ms) = overrides.timeout_ms {
-        if timeout_ms != DEFAULT_TIMEOUT_MS {
-            permissions::ensure_setting_change_allowed("timeout_ms")?;
-        }
-        set_session_string("postllm.timeout_ms", &timeout_ms.to_string())?;
-    }
+    Ok(())
+}
 
-    if let Some(max_retries) = overrides.max_retries {
-        if max_retries != DEFAULT_MAX_RETRIES {
-            permissions::ensure_setting_change_allowed("max_retries")?;
-        }
-        set_session_string("postllm.max_retries", &max_retries.to_string())?;
-    }
+fn apply_hosted_runtime_overrides(overrides: &SessionOverrides) -> Result<()> {
+    apply_optional_i32_override(
+        "postllm.timeout_ms",
+        "timeout_ms",
+        overrides.timeout_ms,
+        DEFAULT_TIMEOUT_MS,
+    )?;
+    apply_optional_i32_override(
+        "postllm.max_retries",
+        "max_retries",
+        overrides.max_retries,
+        DEFAULT_MAX_RETRIES,
+    )?;
+    apply_optional_i32_override(
+        "postllm.retry_backoff_ms",
+        "retry_backoff_ms",
+        overrides.retry_backoff_ms,
+        DEFAULT_RETRY_BACKOFF_MS,
+    )?;
 
-    if let Some(retry_backoff_ms) = overrides.retry_backoff_ms {
-        if retry_backoff_ms != DEFAULT_RETRY_BACKOFF_MS {
-            permissions::ensure_setting_change_allowed("retry_backoff_ms")?;
-        }
-        set_session_string("postllm.retry_backoff_ms", &retry_backoff_ms.to_string())?;
-    }
+    Ok(())
+}
 
+fn apply_candle_runtime_overrides(overrides: &SessionOverrides) -> Result<()> {
     if let Some(candle_cache_dir) = overrides.candle_cache_dir.as_deref() {
         if !candle_cache_dir.trim().is_empty() {
             permissions::ensure_setting_change_allowed("candle_cache_dir")?;
@@ -902,53 +863,49 @@ fn apply_session_overrides_internal(overrides: &SessionOverrides) -> Result<Valu
         set_session_string("postllm.candle_device", candle_device)?;
     }
 
-    if let Some(candle_max_input_tokens) = overrides.candle_max_input_tokens {
-        if candle_max_input_tokens != DEFAULT_CANDLE_MAX_INPUT_TOKENS {
-            permissions::ensure_setting_change_allowed("candle_max_input_tokens")?;
-        }
-        set_session_string(
-            "postllm.candle_max_input_tokens",
-            &candle_max_input_tokens.to_string(),
-        )?;
-    }
+    apply_optional_i32_override(
+        "postllm.candle_max_input_tokens",
+        "candle_max_input_tokens",
+        overrides.candle_max_input_tokens,
+        DEFAULT_CANDLE_MAX_INPUT_TOKENS,
+    )?;
+    apply_optional_i32_override(
+        "postllm.candle_max_concurrency",
+        "candle_max_concurrency",
+        overrides.candle_max_concurrency,
+        DEFAULT_CANDLE_MAX_CONCURRENCY,
+    )?;
 
-    if let Some(candle_max_concurrency) = overrides.candle_max_concurrency {
-        if candle_max_concurrency != DEFAULT_CANDLE_MAX_CONCURRENCY {
-            permissions::ensure_setting_change_allowed("candle_max_concurrency")?;
-        }
-        set_session_string(
-            "postllm.candle_max_concurrency",
-            &candle_max_concurrency.to_string(),
-        )?;
-    }
+    Ok(())
+}
 
-    Ok(snapshot())
+fn apply_optional_i32_override(
+    setting_name: &str,
+    permission_name: &str,
+    value: Option<i32>,
+    default_value: i32,
+) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+
+    if value != default_value {
+        permissions::ensure_setting_change_allowed(permission_name)?;
+    }
+    set_session_string(setting_name, &value.to_string())
 }
 
 fn reset_profile_managed_settings_to_defaults() -> Result<()> {
-    set_session_string("postllm.base_url", DEFAULT_BASE_URL)?;
-    set_session_string("postllm.runtime", DEFAULT_RUNTIME)?;
-    set_session_string("postllm.model", DEFAULT_MODEL)?;
-    set_session_string("postllm.embedding_model", DEFAULT_EMBEDDING_MODEL)?;
-    set_session_string("postllm.api_key", "")?;
-    set_session_string("postllm.api_key_secret", DEFAULT_API_KEY_SECRET)?;
-    set_session_string("postllm.timeout_ms", &DEFAULT_TIMEOUT_MS.to_string())?;
-    set_session_string("postllm.max_retries", &DEFAULT_MAX_RETRIES.to_string())?;
-    set_session_string(
-        "postllm.retry_backoff_ms",
-        &DEFAULT_RETRY_BACKOFF_MS.to_string(),
-    )?;
+    for (setting_name, default_value) in PROFILE_MANAGED_STRING_DEFAULTS {
+        set_session_string(setting_name, default_value)?;
+    }
+
+    for (setting_name, default_value) in PROFILE_MANAGED_INT_DEFAULTS {
+        set_session_string(setting_name, &default_value.to_string())?;
+    }
+
     set_session_string("postllm.candle_cache_dir", "")?;
     set_session_string("postllm.candle_offline", "off")?;
-    set_session_string("postllm.candle_device", DEFAULT_CANDLE_DEVICE)?;
-    set_session_string(
-        "postllm.candle_max_input_tokens",
-        &DEFAULT_CANDLE_MAX_INPUT_TOKENS.to_string(),
-    )?;
-    set_session_string(
-        "postllm.candle_max_concurrency",
-        &DEFAULT_CANDLE_MAX_CONCURRENCY.to_string(),
-    )?;
     Ok(())
 }
 
@@ -973,55 +930,96 @@ fn resolve_generation_model(model_override: Option<&str>) -> Result<String> {
 }
 
 pub(crate) fn ensure_active_privileged_settings_allowed() -> Result<()> {
-    let active_base_url = string_setting(&POSTLLM_BASE_URL);
-    if active_base_url
+    ensure_present_string_setting_allowed(string_setting(&POSTLLM_API_KEY), "api_key")?;
+    ensure_present_string_setting_allowed(
+        string_setting(&POSTLLM_API_KEY_SECRET),
+        "api_key_secret",
+    )?;
+    ensure_present_string_setting_allowed(
+        string_setting(&POSTLLM_CANDLE_CACHE_DIR),
+        "candle_cache_dir",
+    )?;
+    ensure_non_default_string_setting_allowed(
+        string_setting(&POSTLLM_BASE_URL),
+        DEFAULT_BASE_URL,
+        "base_url",
+    )?;
+    ensure_non_default_string_setting_allowed(
+        string_setting(&POSTLLM_CANDLE_DEVICE),
+        DEFAULT_CANDLE_DEVICE,
+        "candle_device",
+    )?;
+    ensure_non_default_i32_setting_allowed(
+        POSTLLM_TIMEOUT_MS.get(),
+        DEFAULT_TIMEOUT_MS,
+        "timeout_ms",
+    )?;
+    ensure_non_default_i32_setting_allowed(
+        POSTLLM_MAX_RETRIES.get(),
+        DEFAULT_MAX_RETRIES,
+        "max_retries",
+    )?;
+    ensure_non_default_i32_setting_allowed(
+        POSTLLM_RETRY_BACKOFF_MS.get(),
+        DEFAULT_RETRY_BACKOFF_MS,
+        "retry_backoff_ms",
+    )?;
+    ensure_non_default_i32_setting_allowed(
+        POSTLLM_CANDLE_MAX_INPUT_TOKENS.get(),
+        DEFAULT_CANDLE_MAX_INPUT_TOKENS,
+        "candle_max_input_tokens",
+    )?;
+    ensure_non_default_i32_setting_allowed(
+        POSTLLM_CANDLE_MAX_CONCURRENCY.get(),
+        DEFAULT_CANDLE_MAX_CONCURRENCY,
+        "candle_max_concurrency",
+    )?;
+    ensure_true_setting_allowed(POSTLLM_CANDLE_OFFLINE.get(), "candle_offline")?;
+
+    Ok(())
+}
+
+fn ensure_present_string_setting_allowed(
+    value: Option<String>,
+    permission_name: &str,
+) -> Result<()> {
+    if value.is_some() {
+        permissions::ensure_setting_change_allowed(permission_name)?;
+    }
+
+    Ok(())
+}
+
+fn ensure_non_default_string_setting_allowed(
+    value: Option<String>,
+    default_value: &str,
+    permission_name: &str,
+) -> Result<()> {
+    if value
         .as_deref()
-        .is_some_and(|value| value != DEFAULT_BASE_URL)
+        .is_some_and(|current| current != default_value)
     {
-        permissions::ensure_setting_change_allowed("base_url")?;
+        permissions::ensure_setting_change_allowed(permission_name)?;
     }
 
-    if string_setting(&POSTLLM_API_KEY).is_some() {
-        permissions::ensure_setting_change_allowed("api_key")?;
+    Ok(())
+}
+
+fn ensure_non_default_i32_setting_allowed(
+    value: i32,
+    default_value: i32,
+    permission_name: &str,
+) -> Result<()> {
+    if value != default_value {
+        permissions::ensure_setting_change_allowed(permission_name)?;
     }
 
-    if string_setting(&POSTLLM_API_KEY_SECRET).is_some() {
-        permissions::ensure_setting_change_allowed("api_key_secret")?;
-    }
+    Ok(())
+}
 
-    if POSTLLM_TIMEOUT_MS.get() != DEFAULT_TIMEOUT_MS {
-        permissions::ensure_setting_change_allowed("timeout_ms")?;
-    }
-
-    if POSTLLM_MAX_RETRIES.get() != DEFAULT_MAX_RETRIES {
-        permissions::ensure_setting_change_allowed("max_retries")?;
-    }
-
-    if POSTLLM_RETRY_BACKOFF_MS.get() != DEFAULT_RETRY_BACKOFF_MS {
-        permissions::ensure_setting_change_allowed("retry_backoff_ms")?;
-    }
-
-    if string_setting(&POSTLLM_CANDLE_CACHE_DIR).is_some() {
-        permissions::ensure_setting_change_allowed("candle_cache_dir")?;
-    }
-
-    if POSTLLM_CANDLE_OFFLINE.get() {
-        permissions::ensure_setting_change_allowed("candle_offline")?;
-    }
-
-    if string_setting(&POSTLLM_CANDLE_DEVICE)
-        .as_deref()
-        .is_some_and(|value| value != DEFAULT_CANDLE_DEVICE)
-    {
-        permissions::ensure_setting_change_allowed("candle_device")?;
-    }
-
-    if POSTLLM_CANDLE_MAX_INPUT_TOKENS.get() != DEFAULT_CANDLE_MAX_INPUT_TOKENS {
-        permissions::ensure_setting_change_allowed("candle_max_input_tokens")?;
-    }
-
-    if POSTLLM_CANDLE_MAX_CONCURRENCY.get() != DEFAULT_CANDLE_MAX_CONCURRENCY {
-        permissions::ensure_setting_change_allowed("candle_max_concurrency")?;
+fn ensure_true_setting_allowed(value: bool, permission_name: &str) -> Result<()> {
+    if value {
+        permissions::ensure_setting_change_allowed(permission_name)?;
     }
 
     Ok(())
@@ -1163,7 +1161,7 @@ fn sanitize_candle_device(value: Option<&str>) -> Result<Option<String>> {
 }
 
 fn validate_profile_keys(object: &Map<String, Value>) -> Result<()> {
-    const ALLOWED_KEYS: [&str; 12] = [
+    const ALLOWED_KEYS: [&str; 13] = [
         "base_url",
         "model",
         "embedding_model",
@@ -1176,11 +1174,11 @@ fn validate_profile_keys(object: &Map<String, Value>) -> Result<()> {
         "candle_offline",
         "candle_device",
         "candle_max_input_tokens",
+        "candle_max_concurrency",
     ];
-    const EXTRA_KEY: &str = "candle_max_concurrency";
 
     for key in object.keys() {
-        if !ALLOWED_KEYS.contains(&key.as_str()) && key != EXTRA_KEY {
+        if !ALLOWED_KEYS.contains(&key.as_str()) {
             return Err(Error::Config(format!(
                 "stored profile config includes unsupported key '{key}'; fix: rewrite it with postllm.profile_set(...)"
             )));

@@ -182,6 +182,32 @@ Issues:
 - [ ] `PL-059` Add a cookbook with copy-paste examples for local chat, hosted chat, embeddings, RAG, structured outputs, and tools.
 - [ ] `PL-060` Add a polished demo path and sample app that gets a new user from clone to success in under ten minutes.
 
+## Release Gate: Code Quality And Maintainability
+
+Goal: make the codebase look deliberate, readable, and professionally maintainable before public release.
+
+This is a release gate, not a nice-to-have:
+
+- Do not ship publicly until this section is cleared.
+- The focus is reducing unnecessary complexity, duplication, and long hard-to-follow functions in core runtime, policy, and SQL-surface code.
+
+Exit criteria:
+
+- Core request/configuration/policy code has clear ownership boundaries and smaller units.
+- New contributors can follow the runtime/configuration path without reading giant functions end to end.
+- Error handling and policy enforcement are centralized instead of repeated in multiple layers.
+- Tests validate behavior without relying on sprawling, repetitive setup code.
+- Public-facing source reads like production code written on purpose, not accumulated patches.
+
+Issues:
+
+- [x] `PL-061` Refactor the session-settings and runtime-resolution path into smaller focused units with a clear data flow from GUCs to validated request settings.
+- [ ] `PL-062` Split hosted HTTP endpoint policy, provider inference, and discovery logic into a cohesive policy module so URL parsing and enforcement are not scattered across `guc`, `client`, and `backend`.
+- [ ] `PL-063` Reduce repetitive `Settings` construction and test fixture boilerplate across Rust unit tests and `pg_test` coverage with shared builders/helpers.
+- [ ] `PL-064` Break up long SQL entrypoint and helper functions in `src/lib.rs` so each function does one thing and cross-cutting concerns are pushed into narrower modules.
+- [ ] `PL-065` Standardize operator-policy code around one obvious pattern for secrets, permissions, network policy, quotas, and future governance controls.
+- [ ] `PL-066` Add a maintainability pass focused on naming, comments, module boundaries, and deletion of dead or redundant code introduced during feature expansion.
+
 ## Recommended Ship Order
 
 If this work needs to be broken into release trains, ship it in this order:
@@ -191,9 +217,10 @@ If this work needs to be broken into release trains, ship it in this order:
 3. Milestone 3: structured outputs, tools, and streaming.
 4. Milestone 4: retrieval and embedding workflow.
 5. Milestone 6: production safety and governance.
-6. Milestone 5: runtime and model operations.
-7. Milestone 7: async workflows and higher-level primitives.
-8. Milestone 8: provider coverage, packaging, and adoption.
+6. Release Gate: code quality and maintainability.
+7. Milestone 5: runtime and model operations.
+8. Milestone 7: async workflows and higher-level primitives.
+9. Milestone 8: provider coverage, packaging, and adoption.
 
 Milestones 5 and 6 are intentionally separate. Runtime operations make local inference usable; production safety makes the extension deployable.
 
