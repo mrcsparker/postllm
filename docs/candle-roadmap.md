@@ -35,6 +35,8 @@ Optional local GPU selection is now available through `postllm.candle_device`, w
 
 Named configuration profiles, encrypted provider-secret references, and lane-aware model aliases are now available through `postllm.profile_set(...)`, `postllm.profile_apply(...)`, `postllm.secret_set(...)`, and `postllm.model_alias_set(...)`, so switching between local and hosted setups no longer requires hand-editing a full bundle of session settings each time.
 
+Role-aware governance controls are now available through `postllm.permission_set(...)`, `postllm.permissions()`, and the shared runtime/model resolution path, so operators can allowlist runtimes, generation models, embedding models, and privileged setting changes per PostgreSQL role.
+
 Reranking is now available through `postllm.rerank(...)`. On the Candle runtime it reuses the active local embedding model and scores candidates by local similarity. On the `openai` runtime it forwards a hosted rerank request to `postllm.base_url` and normalizes the returned ranked rows.
 
 ## Why Candle

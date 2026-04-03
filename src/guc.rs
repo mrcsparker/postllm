@@ -5,6 +5,7 @@
 
 use crate::backend::{CandleDevice, Runtime, Settings};
 use crate::error::{Error, Result};
+use crate::permissions;
 use pgrx::datum::DatumWithOid;
 use pgrx::spi::Spi;
 use pgrx::{GucContext, GucFlags, GucRegistry, GucSetting};
@@ -435,7 +436,9 @@ pub(crate) fn resolve(model_override: Option<&str>) -> Result<Settings> {
             "SET postllm.runtime = 'openai' or 'candle'",
         )
     })?;
+    permissions::ensure_runtime_allowed(runtime)?;
     let model = resolve_generation_model(model_override)?;
+    ensure_active_privileged_settings_allowed()?;
 
     Ok(Settings {
         runtime,
@@ -516,13 +519,19 @@ pub(crate) fn resolve_rerank(model_override: Option<&str>) -> Result<Settings> {
             "SET postllm.runtime = 'openai' or 'candle'",
         )
     })?;
+    permissions::ensure_runtime_allowed(runtime)?;
     let model = match runtime {
         Runtime::OpenAi => match model_override.and_then(trimmed_or_none) {
-            Some(model) => resolve_generation_alias(model)?,
+            Some(model) => {
+                let resolved = resolve_generation_alias(model)?;
+                permissions::ensure_generation_model_allowed(&resolved)?;
+                resolved
+            }
             None => resolve_generation_model(None)?,
         },
         Runtime::Candle => resolve_embedding_model(model_override)?,
     };
+    ensure_active_privileged_settings_allowed()?;
 
     Ok(Settings {
         runtime,
@@ -588,6 +597,8 @@ pub(crate) fn resolve_embedding_settings(model_override: Option<&str>) -> Result
     })?;
     let candle_device = resolve_candle_device()?;
 
+    ensure_active_privileged_settings_allowed()?;
+
     Ok(Settings {
         runtime: Runtime::Candle,
         model: resolve_embedding_model(model_override)?,
@@ -616,7 +627,9 @@ pub(crate) fn resolve_embedding_model(model_override: Option<&str>) -> Result<St
         |model| Ok(model.to_owned()),
     )?;
 
-    resolve_embedding_alias(&model)
+    let resolved = resolve_embedding_alias(&model)?;
+    permissions::ensure_embedding_model_allowed(&resolved)?;
+    Ok(resolved)
 }
 
 /// Resolves the optional Candle cache directory.
@@ -743,18 +756,26 @@ pub(crate) fn apply_profile_overrides(overrides: &SessionOverrides) -> Result<Va
 
 fn apply_session_overrides_internal(overrides: &SessionOverrides) -> Result<Value> {
     if let Some(base_url) = overrides.base_url.as_deref() {
+        if base_url != DEFAULT_BASE_URL {
+            permissions::ensure_setting_change_allowed("base_url")?;
+        }
         set_session_string("postllm.base_url", base_url)?;
     }
 
     if let Some(runtime) = overrides.runtime.as_deref() {
+        permissions::ensure_runtime_allowed(Runtime::parse(runtime)?)?;
         set_session_string("postllm.runtime", runtime)?;
     }
 
     if let Some(model) = overrides.model.as_deref() {
+        let resolved = resolve_generation_alias(model)?;
+        permissions::ensure_generation_model_allowed(&resolved)?;
         set_session_string("postllm.model", model)?;
     }
 
     if let Some(embedding_model) = overrides.embedding_model.as_deref() {
+        let resolved = resolve_embedding_alias(embedding_model)?;
+        permissions::ensure_embedding_model_allowed(&resolved)?;
         set_session_string("postllm.embedding_model", embedding_model)?;
     }
 
@@ -767,32 +788,49 @@ fn apply_session_overrides_internal(overrides: &SessionOverrides) -> Result<Valu
     }
 
     if let Some(api_key) = overrides.api_key.as_deref() {
+        permissions::ensure_setting_change_allowed("api_key")?;
         set_session_string("postllm.api_key", api_key)?;
     }
 
     if let Some(api_key_secret) = overrides.api_key_secret.as_deref() {
+        permissions::ensure_setting_change_allowed("api_key_secret")?;
         let resolved_api_key = crate::catalog::secret_value(api_key_secret)?;
         set_session_string("postllm.api_key", &resolved_api_key)?;
         set_session_string("postllm.api_key_secret", api_key_secret)?;
     }
 
     if let Some(timeout_ms) = overrides.timeout_ms {
+        if timeout_ms != DEFAULT_TIMEOUT_MS {
+            permissions::ensure_setting_change_allowed("timeout_ms")?;
+        }
         set_session_string("postllm.timeout_ms", &timeout_ms.to_string())?;
     }
 
     if let Some(max_retries) = overrides.max_retries {
+        if max_retries != DEFAULT_MAX_RETRIES {
+            permissions::ensure_setting_change_allowed("max_retries")?;
+        }
         set_session_string("postllm.max_retries", &max_retries.to_string())?;
     }
 
     if let Some(retry_backoff_ms) = overrides.retry_backoff_ms {
+        if retry_backoff_ms != DEFAULT_RETRY_BACKOFF_MS {
+            permissions::ensure_setting_change_allowed("retry_backoff_ms")?;
+        }
         set_session_string("postllm.retry_backoff_ms", &retry_backoff_ms.to_string())?;
     }
 
     if let Some(candle_cache_dir) = overrides.candle_cache_dir.as_deref() {
+        if !candle_cache_dir.trim().is_empty() {
+            permissions::ensure_setting_change_allowed("candle_cache_dir")?;
+        }
         set_session_string("postllm.candle_cache_dir", candle_cache_dir)?;
     }
 
     if let Some(candle_offline) = overrides.candle_offline {
+        if candle_offline {
+            permissions::ensure_setting_change_allowed("candle_offline")?;
+        }
         set_session_string(
             "postllm.candle_offline",
             if candle_offline { "on" } else { "off" },
@@ -800,10 +838,16 @@ fn apply_session_overrides_internal(overrides: &SessionOverrides) -> Result<Valu
     }
 
     if let Some(candle_device) = overrides.candle_device.as_deref() {
+        if candle_device != DEFAULT_CANDLE_DEVICE {
+            permissions::ensure_setting_change_allowed("candle_device")?;
+        }
         set_session_string("postllm.candle_device", candle_device)?;
     }
 
     if let Some(candle_max_input_tokens) = overrides.candle_max_input_tokens {
+        if candle_max_input_tokens != DEFAULT_CANDLE_MAX_INPUT_TOKENS {
+            permissions::ensure_setting_change_allowed("candle_max_input_tokens")?;
+        }
         set_session_string(
             "postllm.candle_max_input_tokens",
             &candle_max_input_tokens.to_string(),
@@ -811,6 +855,9 @@ fn apply_session_overrides_internal(overrides: &SessionOverrides) -> Result<Valu
     }
 
     if let Some(candle_max_concurrency) = overrides.candle_max_concurrency {
+        if candle_max_concurrency != DEFAULT_CANDLE_MAX_CONCURRENCY {
+            permissions::ensure_setting_change_allowed("candle_max_concurrency")?;
+        }
         set_session_string(
             "postllm.candle_max_concurrency",
             &candle_max_concurrency.to_string(),
@@ -862,7 +909,64 @@ fn resolve_generation_model(model_override: Option<&str>) -> Result<String> {
         |model| Ok(model.to_owned()),
     )?;
 
-    resolve_generation_alias(&model)
+    let resolved = resolve_generation_alias(&model)?;
+    permissions::ensure_generation_model_allowed(&resolved)?;
+    Ok(resolved)
+}
+
+pub(crate) fn ensure_active_privileged_settings_allowed() -> Result<()> {
+    let active_base_url = string_setting(&POSTLLM_BASE_URL);
+    if active_base_url
+        .as_deref()
+        .is_some_and(|value| value != DEFAULT_BASE_URL)
+    {
+        permissions::ensure_setting_change_allowed("base_url")?;
+    }
+
+    if string_setting(&POSTLLM_API_KEY).is_some() {
+        permissions::ensure_setting_change_allowed("api_key")?;
+    }
+
+    if string_setting(&POSTLLM_API_KEY_SECRET).is_some() {
+        permissions::ensure_setting_change_allowed("api_key_secret")?;
+    }
+
+    if POSTLLM_TIMEOUT_MS.get() != DEFAULT_TIMEOUT_MS {
+        permissions::ensure_setting_change_allowed("timeout_ms")?;
+    }
+
+    if POSTLLM_MAX_RETRIES.get() != DEFAULT_MAX_RETRIES {
+        permissions::ensure_setting_change_allowed("max_retries")?;
+    }
+
+    if POSTLLM_RETRY_BACKOFF_MS.get() != DEFAULT_RETRY_BACKOFF_MS {
+        permissions::ensure_setting_change_allowed("retry_backoff_ms")?;
+    }
+
+    if string_setting(&POSTLLM_CANDLE_CACHE_DIR).is_some() {
+        permissions::ensure_setting_change_allowed("candle_cache_dir")?;
+    }
+
+    if POSTLLM_CANDLE_OFFLINE.get() {
+        permissions::ensure_setting_change_allowed("candle_offline")?;
+    }
+
+    if string_setting(&POSTLLM_CANDLE_DEVICE)
+        .as_deref()
+        .is_some_and(|value| value != DEFAULT_CANDLE_DEVICE)
+    {
+        permissions::ensure_setting_change_allowed("candle_device")?;
+    }
+
+    if POSTLLM_CANDLE_MAX_INPUT_TOKENS.get() != DEFAULT_CANDLE_MAX_INPUT_TOKENS {
+        permissions::ensure_setting_change_allowed("candle_max_input_tokens")?;
+    }
+
+    if POSTLLM_CANDLE_MAX_CONCURRENCY.get() != DEFAULT_CANDLE_MAX_CONCURRENCY {
+        permissions::ensure_setting_change_allowed("candle_max_concurrency")?;
+    }
+
+    Ok(())
 }
 
 fn resolve_generation_alias(model: &str) -> Result<String> {

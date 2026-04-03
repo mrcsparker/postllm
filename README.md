@@ -18,6 +18,10 @@ The extension is built around a native schema-scoped API:
 - `postllm.secret(name text) -> jsonb`
 - `postllm.secret_set(name text, value text, description text default null) -> jsonb`
 - `postllm.secret_delete(name text) -> jsonb`
+- `postllm.permissions() -> jsonb`
+- `postllm.permission(role_name text, object_type text, target text) -> jsonb`
+- `postllm.permission_set(role_name text, object_type text, target text, description text default null) -> jsonb`
+- `postllm.permission_delete(role_name text, object_type text, target text) -> jsonb`
 - `postllm.model_aliases() -> jsonb`
 - `postllm.model_alias(alias text, lane text) -> jsonb`
 - `postllm.model_alias_set(alias text, lane text, model text, description text default null) -> jsonb`
@@ -181,6 +185,24 @@ SELECT postllm.profile_apply('hosted-prod');
 ```
 
 Application roles can then use `postllm.profile_apply(...)` or `postllm.configure(api_key_secret => 'openai-prod')` without learning the raw credential. `postllm.settings()` reports `has_api_key`, `api_key_source`, and `api_key_secret`, but never returns the secret itself.
+
+When you need governance on top of that workflow, `postllm.permission_set(...)` adds role-aware allowlists for `runtime`, `generation_model`, `embedding_model`, and privileged `setting` changes. Runtime and model permissions become category-wide allowlists once any rule exists, while setting permissions protect non-default changes for the named setting. Use `target => '*'` to grant every runtime, model, or privileged setting within that object type.
+
+```sql
+SELECT postllm.permission_set(
+    role_name => 'app_runtime_openai',
+    object_type => 'runtime',
+    target => 'openai',
+    description => 'Application role may use hosted runtimes only'
+);
+
+SELECT postllm.permission_set(
+    role_name => 'app_runtime_openai',
+    object_type => 'setting',
+    target => 'base_url',
+    description => 'Application role may switch hosted endpoints'
+);
+```
 
 For reusable model shorthands, `postllm.model_alias_set(...)` stores lane-aware generation and embedding aliases. Once defined, aliases resolve automatically through `postllm.capabilities()`, `postllm.chat(...)`, `postllm.complete(...)`, `postllm.embed(...)`, `postllm.embedding_model_info(...)`, rerank helpers, and local model lifecycle commands.
 

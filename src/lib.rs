@@ -7,6 +7,7 @@ pub(crate) mod client;
 pub(crate) mod error;
 pub(crate) mod guc;
 pub(crate) mod interrupt;
+pub(crate) mod permissions;
 pub(crate) mod secrets;
 
 use crate::backend::RequestOptions;
@@ -76,6 +77,20 @@ pgrx::extension_sql!(
 
     COMMENT ON TABLE postllm.model_aliases IS
         'Lane-aware generation and embedding model aliases used by postllm resolution paths.';
+
+    CREATE TABLE postllm.role_permissions (
+        role_name text NOT NULL,
+        object_type text NOT NULL,
+        target text NOT NULL,
+        description text,
+        created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        PRIMARY KEY (role_name, object_type, target),
+        CHECK (object_type IN ('runtime', 'generation_model', 'embedding_model', 'setting'))
+    );
+
+    COMMENT ON TABLE postllm.role_permissions IS
+        'Role-aware postllm allowlist rules for runtimes, models, and privileged settings.';
     ",
     name = "postllm_catalog_tables",
     requires = [postllm::settings],
@@ -249,6 +264,48 @@ mod postllm {
     #[search_path(postllm, pg_catalog)]
     fn secret_delete(name: &str) -> JsonB {
         crate::finish_json_result(crate::secret_delete_impl(name))
+    }
+
+    /// Returns all configured postllm role permissions.
+    #[pg_extern(security_definer)]
+    #[search_path(postllm, pg_catalog)]
+    fn permissions() -> JsonB {
+        crate::finish_json_result(crate::permissions_impl())
+    }
+
+    /// Returns one configured postllm role permission.
+    #[pg_extern(security_definer)]
+    #[search_path(postllm, pg_catalog)]
+    fn permission(role_name: &str, object_type: &str, target: &str) -> JsonB {
+        crate::finish_json_result(crate::permission_impl(role_name, object_type, target))
+    }
+
+    /// Stores or updates a postllm role permission.
+    #[pg_extern(security_definer)]
+    #[search_path(postllm, pg_catalog)]
+    fn permission_set(
+        role_name: &str,
+        object_type: &str,
+        target: &str,
+        description: default!(Option<&str>, "NULL"),
+    ) -> JsonB {
+        crate::finish_json_result(crate::permission_set_impl(
+            role_name,
+            object_type,
+            target,
+            description,
+        ))
+    }
+
+    /// Deletes a postllm role permission.
+    #[pg_extern(security_definer)]
+    #[search_path(postllm, pg_catalog)]
+    fn permission_delete(role_name: &str, object_type: &str, target: &str) -> JsonB {
+        crate::finish_json_result(crate::permission_delete_impl(
+            role_name,
+            object_type,
+            target,
+        ))
     }
 
     /// Returns all configured model aliases.
@@ -1829,6 +1886,34 @@ fn secret_delete_impl(name: &str) -> Result<Value> {
     catalog::secret_delete(name)
 }
 
+fn permissions_impl() -> Result<Value> {
+    require_superuser("postllm.permissions")?;
+    permissions::permissions()
+}
+
+fn permission_impl(role_name: &str, object_type: &str, target: &str) -> Result<Value> {
+    require_superuser("postllm.permission")?;
+    let object_type = permissions::PermissionObjectType::parse("object_type", object_type)?;
+    permissions::permission(role_name, object_type, target)
+}
+
+fn permission_set_impl(
+    role_name: &str,
+    object_type: &str,
+    target: &str,
+    description: Option<&str>,
+) -> Result<Value> {
+    require_superuser("postllm.permission_set")?;
+    let object_type = permissions::PermissionObjectType::parse("object_type", object_type)?;
+    permissions::permission_set(role_name, object_type, target, description)
+}
+
+fn permission_delete_impl(role_name: &str, object_type: &str, target: &str) -> Result<Value> {
+    require_superuser("postllm.permission_delete")?;
+    let object_type = permissions::PermissionObjectType::parse("object_type", object_type)?;
+    permissions::permission_delete(role_name, object_type, target)
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "the SQL surface intentionally exposes a flat profile_set(...) API aligned with configure(...)"
@@ -1879,19 +1964,12 @@ fn profile_delete_impl(name: &str) -> Result<Value> {
 }
 
 fn require_superuser(function_name: &str) -> Result<()> {
-    let is_superuser = Spi::get_one::<bool>(
-        "SELECT COALESCE(
-            (SELECT rolsuper FROM pg_roles WHERE rolname = current_user),
-            false
-        )",
-    )?
-    .unwrap_or(false);
-
-    if is_superuser {
+    if permissions::caller_is_superuser() {
         Ok(())
     } else {
+        let role_name = permissions::caller_role_name();
         Err(Error::Config(format!(
-            "{function_name}(...) requires a PostgreSQL superuser; fix: run it as a superuser and let application roles use postllm.configure(api_key_secret => ...) or postllm.profile_apply(...)"
+            "{function_name}(...) requires a PostgreSQL superuser for role '{role_name}'; fix: run it as a superuser and let application roles use postllm.configure(api_key_secret => ...) or postllm.profile_apply(...)"
         )))
     }
 }
@@ -1921,6 +1999,7 @@ fn model_alias_delete_impl(alias: &str, lane: &str) -> Result<Value> {
 }
 
 fn embedding_model_info_impl(model: Option<&str>) -> Result<Value> {
+    guc::ensure_active_privileged_settings_allowed()?;
     let model = guc::resolve_embedding_model(model)?;
     let candle_cache_dir = guc::resolve_candle_cache_dir();
     let candle_offline = guc::resolve_candle_offline();
@@ -1929,6 +2008,7 @@ fn embedding_model_info_impl(model: Option<&str>) -> Result<Value> {
 }
 
 fn model_install_impl(model: Option<&str>, lane: Option<&str>) -> Result<Value> {
+    guc::ensure_active_privileged_settings_allowed()?;
     let target = resolve_local_model_target(model, lane)?;
     let candle_cache_dir = guc::resolve_candle_cache_dir();
     let candle_offline = guc::resolve_candle_offline();
@@ -1944,6 +2024,7 @@ fn model_install_impl(model: Option<&str>, lane: Option<&str>) -> Result<Value> 
 }
 
 fn model_prewarm_impl(model: Option<&str>, lane: Option<&str>) -> Result<Value> {
+    guc::ensure_active_privileged_settings_allowed()?;
     let target = resolve_local_model_target(model, lane)?;
     let candle_cache_dir = guc::resolve_candle_cache_dir();
     let candle_offline = guc::resolve_candle_offline();
@@ -1959,6 +2040,7 @@ fn model_prewarm_impl(model: Option<&str>, lane: Option<&str>) -> Result<Value> 
 }
 
 fn model_inspect_impl(model: Option<&str>, lane: Option<&str>) -> Result<Value> {
+    guc::ensure_active_privileged_settings_allowed()?;
     let target = resolve_local_model_target(model, lane)?;
     let candle_cache_dir = guc::resolve_candle_cache_dir();
     let candle_offline = guc::resolve_candle_offline();
@@ -1974,6 +2056,7 @@ fn model_inspect_impl(model: Option<&str>, lane: Option<&str>) -> Result<Value> 
 }
 
 fn model_evict_impl(model: Option<&str>, lane: Option<&str>, scope: &str) -> Result<Value> {
+    guc::ensure_active_privileged_settings_allowed()?;
     let target = resolve_local_model_target(model, lane)?;
     let scope = parse_local_model_evict_scope(scope)?;
     let candle_cache_dir = guc::resolve_candle_cache_dir();
@@ -5472,6 +5555,25 @@ mod tests {
         Spi::get_one::<String>(query).expect("SPI should execute")
     }
 
+    fn sql_run(query: &str) {
+        Spi::run(query).expect("SPI should execute");
+    }
+
+    fn unique_role_name(label: &str) -> String {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after the unix epoch")
+            .as_nanos();
+        format!("postllm_{}_{}_{}", label, std::process::id(), unique)
+    }
+
+    fn create_test_role(label: &str) -> String {
+        let role_name = unique_role_name(label);
+        sql_run(&format!("CREATE ROLE {role_name} NOLOGIN"));
+        sql_run(&format!("GRANT {role_name} TO CURRENT_USER"));
+        role_name
+    }
+
     fn start_mock_stream_server(response_body: &str) -> (String, mpsc::Receiver<Value>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
         let address = format!(
@@ -5855,7 +5957,165 @@ mod tests {
     fn sql_profiles_and_model_aliases_should_default_to_empty_arrays() {
         assert_eq!(sql_json("SELECT postllm.profiles()"), json!([]));
         assert_eq!(sql_json("SELECT postllm.secrets()"), json!([]));
+        assert_eq!(sql_json("SELECT postllm.permissions()"), json!([]));
         assert_eq!(sql_json("SELECT postllm.model_aliases()"), json!([]));
+    }
+
+    #[pg_test]
+    fn sql_permissions_should_store_and_delete_rows() {
+        let role_name = create_test_role("permissions");
+        let stored = sql_json(&format!(
+            "SELECT postllm.permission_set(
+                role_name => {},
+                object_type => 'runtime',
+                target => 'openai',
+                description => 'Hosted runtime access'
+            )",
+            sql_literal(&role_name),
+        ));
+        let fetched = sql_json(&format!(
+            "SELECT postllm.permission(
+                role_name => {},
+                object_type => 'runtime',
+                target => 'openai'
+            )",
+            sql_literal(&role_name),
+        ));
+        let listed = sql_json("SELECT postllm.permissions()");
+        let deleted = sql_json(&format!(
+            "SELECT postllm.permission_delete(
+                role_name => {},
+                object_type => 'runtime',
+                target => 'openai'
+            )",
+            sql_literal(&role_name),
+        ));
+
+        assert_eq!(stored["role_name"], role_name);
+        assert_eq!(stored["object_type"], "runtime");
+        assert_eq!(stored["target"], "openai");
+        assert_eq!(stored["description"], "Hosted runtime access");
+        assert_eq!(fetched["role_name"], role_name);
+        assert_eq!(listed.as_array().map(Vec::len), Some(1));
+        assert_eq!(deleted["deleted"], true);
+        assert_eq!(sql_json("SELECT postllm.permissions()"), json!([]));
+    }
+
+    #[pg_test]
+    fn sql_configure_should_allow_permitted_runtime_for_outer_role() {
+        let role_name = create_test_role("runtime_allowed");
+        drop(sql_json(&format!(
+            "SELECT postllm.permission_set(
+                role_name => {},
+                object_type => 'runtime',
+                target => 'openai'
+            )",
+            sql_literal(&role_name),
+        )));
+
+        sql_run(&format!("SET LOCAL ROLE {role_name}"));
+        let configured = sql_json("SELECT postllm.configure(runtime => 'openai')");
+
+        assert_eq!(configured["runtime"], "openai");
+    }
+
+    #[pg_test]
+    #[should_panic(expected = "postllm access denied for role '")]
+    fn sql_configure_should_reject_disallowed_runtime_for_outer_role() {
+        let allowed_role = create_test_role("runtime_policy");
+        let caller_role = create_test_role("runtime_denied");
+        drop(sql_json(&format!(
+            "SELECT postllm.permission_set(
+                role_name => {},
+                object_type => 'runtime',
+                target => 'openai'
+            )",
+            sql_literal(&allowed_role),
+        )));
+
+        sql_run(&format!("SET LOCAL ROLE {caller_role}"));
+        drop(Spi::get_one::<JsonB>(
+            "SELECT postllm.configure(runtime => 'openai')",
+        ));
+    }
+
+    #[pg_test]
+    #[should_panic(expected = "generation model 'blocked-model' is not permitted")]
+    fn sql_complete_should_reject_disallowed_generation_model_for_outer_role() {
+        let allowed_role = create_test_role("generation_policy");
+        let caller_role = create_test_role("generation_denied");
+        drop(sql_json(&format!(
+            "SELECT postllm.permission_set(
+                role_name => {},
+                object_type => 'generation_model',
+                target => 'allowed-model'
+            )",
+            sql_literal(&allowed_role),
+        )));
+
+        sql_run(&format!("SET LOCAL ROLE {caller_role}"));
+        drop(Spi::get_one::<String>(
+            "SELECT postllm.complete(prompt => 'hello', model => 'blocked-model')",
+        ));
+    }
+
+    #[pg_test]
+    #[should_panic(expected = "embedding model 'blocked-embed' is not permitted")]
+    fn sql_embed_should_reject_disallowed_embedding_model_for_outer_role() {
+        let allowed_role = create_test_role("embedding_policy");
+        let caller_role = create_test_role("embedding_denied");
+        drop(sql_json(&format!(
+            "SELECT postllm.permission_set(
+                role_name => {},
+                object_type => 'embedding_model',
+                target => 'sentence-transformers/all-MiniLM-L6-v2'
+            )",
+            sql_literal(&allowed_role),
+        )));
+
+        sql_run(&format!("SET LOCAL ROLE {caller_role}"));
+        drop(Spi::get_one::<Vec<f32>>(
+            "SELECT postllm.embed('hello from SQL', model => 'blocked-embed')",
+        ));
+    }
+
+    #[pg_test]
+    #[should_panic(expected = "privileged setting 'base_url' is not permitted")]
+    fn sql_configure_should_reject_disallowed_privileged_setting_for_outer_role() {
+        let allowed_role = create_test_role("setting_policy");
+        let caller_role = create_test_role("setting_denied");
+        drop(sql_json(&format!(
+            "SELECT postllm.permission_set(
+                role_name => {},
+                object_type => 'setting',
+                target => 'base_url'
+            )",
+            sql_literal(&allowed_role),
+        )));
+
+        sql_run(&format!("SET LOCAL ROLE {caller_role}"));
+        drop(Spi::get_one::<JsonB>(
+            "SELECT postllm.configure(base_url => 'http://127.0.0.1:9999/v1/chat/completions')",
+        ));
+    }
+
+    #[pg_test]
+    #[should_panic(expected = "privileged setting 'base_url' is not permitted")]
+    fn sql_runtime_discover_should_reject_unauthorized_direct_base_url_setting() {
+        let allowed_role = create_test_role("setting_direct_policy");
+        let caller_role = create_test_role("setting_direct_denied");
+        drop(sql_json(&format!(
+            "SELECT postllm.permission_set(
+                role_name => {},
+                object_type => 'setting',
+                target => 'base_url'
+            )",
+            sql_literal(&allowed_role),
+        )));
+
+        sql_run(&format!("SET LOCAL ROLE {caller_role}"));
+        sql_run("SET LOCAL postllm.base_url = 'http://127.0.0.1:9999/v1/chat/completions'");
+        drop(Spi::get_one::<JsonB>("SELECT postllm.runtime_discover()"));
     }
 
     #[pg_test]
