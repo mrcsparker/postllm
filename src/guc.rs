@@ -38,6 +38,10 @@ static POSTLLM_API_KEY_SECRET: GucSetting<Option<CString>> =
 static POSTLLM_TIMEOUT_MS: GucSetting<i32> = GucSetting::<i32>::new(30_000);
 static POSTLLM_MAX_RETRIES: GucSetting<i32> = GucSetting::<i32>::new(2);
 static POSTLLM_RETRY_BACKOFF_MS: GucSetting<i32> = GucSetting::<i32>::new(250);
+static POSTLLM_HTTP_ALLOWED_HOSTS: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
+static POSTLLM_HTTP_ALLOWED_PROVIDERS: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
 static POSTLLM_CANDLE_CACHE_DIR: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(None);
 static POSTLLM_CANDLE_OFFLINE: GucSetting<bool> = GucSetting::<bool>::new(false);
@@ -311,6 +315,24 @@ fn register_hosted_runtime_gucs() {
         GucContext::Userset,
         GucFlags::UNIT_MS,
     );
+
+    GucRegistry::define_string_guc(
+        c"postllm.http_allowed_hosts",
+        c"Optional hosted HTTP host allowlist.",
+        c"Comma-separated host, host:port, or *.suffix entries that limit which OpenAI-compatible endpoints postllm may contact. Empty means unrestricted.",
+        &POSTLLM_HTTP_ALLOWED_HOSTS,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_string_guc(
+        c"postllm.http_allowed_providers",
+        c"Optional hosted HTTP provider safelist.",
+        c"Comma-separated provider identities such as openai, ollama, and openai-compatible that limit which hosted provider families postllm may use. Empty means unrestricted.",
+        &POSTLLM_HTTP_ALLOWED_PROVIDERS,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
 }
 
 fn register_candle_runtime_gucs() {
@@ -407,6 +429,8 @@ pub(crate) fn resolve(model_override: Option<&str>) -> Result<Settings> {
             "SET postllm.retry_backoff_ms = 250 or another non-negative integer",
         )
     })?;
+    let http_allowed_hosts = resolve_http_allowed_hosts()?;
+    let http_allowed_providers = resolve_http_allowed_providers()?;
     let candle_max_input_tokens = u32::try_from(POSTLLM_CANDLE_MAX_INPUT_TOKENS.get()).map_err(|_| {
         Error::invalid_setting(
             "postllm.candle_max_input_tokens",
@@ -440,7 +464,7 @@ pub(crate) fn resolve(model_override: Option<&str>) -> Result<Settings> {
     let model = resolve_generation_model(model_override)?;
     ensure_active_privileged_settings_allowed()?;
 
-    Ok(Settings {
+    let settings = Settings {
         runtime,
         model,
         base_url: string_setting(&POSTLLM_BASE_URL),
@@ -448,12 +472,18 @@ pub(crate) fn resolve(model_override: Option<&str>) -> Result<Settings> {
         timeout_ms,
         max_retries,
         retry_backoff_ms,
+        http_allowed_hosts,
+        http_allowed_providers,
         candle_cache_dir: string_setting(&POSTLLM_CANDLE_CACHE_DIR),
         candle_offline: POSTLLM_CANDLE_OFFLINE.get(),
         candle_device,
         candle_max_input_tokens,
         candle_max_concurrency,
-    })
+    };
+
+    crate::client::enforce_http_endpoint_policy(&settings)?;
+
+    Ok(settings)
 }
 
 /// Resolves settings for reranking requests.
@@ -490,6 +520,8 @@ pub(crate) fn resolve_rerank(model_override: Option<&str>) -> Result<Settings> {
             "SET postllm.retry_backoff_ms = 250 or another non-negative integer",
         )
     })?;
+    let http_allowed_hosts = resolve_http_allowed_hosts()?;
+    let http_allowed_providers = resolve_http_allowed_providers()?;
     let candle_max_input_tokens = u32::try_from(POSTLLM_CANDLE_MAX_INPUT_TOKENS.get()).map_err(|_| {
         Error::invalid_setting(
             "postllm.candle_max_input_tokens",
@@ -533,7 +565,7 @@ pub(crate) fn resolve_rerank(model_override: Option<&str>) -> Result<Settings> {
     };
     ensure_active_privileged_settings_allowed()?;
 
-    Ok(Settings {
+    let settings = Settings {
         runtime,
         model,
         base_url: string_setting(&POSTLLM_BASE_URL),
@@ -541,12 +573,18 @@ pub(crate) fn resolve_rerank(model_override: Option<&str>) -> Result<Settings> {
         timeout_ms,
         max_retries,
         retry_backoff_ms,
+        http_allowed_hosts,
+        http_allowed_providers,
         candle_cache_dir: string_setting(&POSTLLM_CANDLE_CACHE_DIR),
         candle_offline: POSTLLM_CANDLE_OFFLINE.get(),
         candle_device,
         candle_max_input_tokens,
         candle_max_concurrency,
-    })
+    };
+
+    crate::client::enforce_http_endpoint_policy(&settings)?;
+
+    Ok(settings)
 }
 
 /// Resolves settings for local Candle embedding requests.
@@ -581,6 +619,8 @@ pub(crate) fn resolve_embedding_settings(model_override: Option<&str>) -> Result
             "SET postllm.retry_backoff_ms = 250 or another non-negative integer",
         )
     })?;
+    let http_allowed_hosts = resolve_http_allowed_hosts()?;
+    let http_allowed_providers = resolve_http_allowed_providers()?;
     let candle_max_input_tokens = u32::try_from(POSTLLM_CANDLE_MAX_INPUT_TOKENS.get()).map_err(|_| {
         Error::invalid_setting(
             "postllm.candle_max_input_tokens",
@@ -607,6 +647,8 @@ pub(crate) fn resolve_embedding_settings(model_override: Option<&str>) -> Result
         timeout_ms,
         max_retries,
         retry_backoff_ms,
+        http_allowed_hosts,
+        http_allowed_providers,
         candle_cache_dir: string_setting(&POSTLLM_CANDLE_CACHE_DIR),
         candle_offline: POSTLLM_CANDLE_OFFLINE.get(),
         candle_device,
@@ -664,6 +706,20 @@ pub(crate) fn resolve_candle_device() -> Result<CandleDevice> {
     })
 }
 
+pub(crate) fn resolve_http_allowed_hosts() -> Result<Vec<String>> {
+    parse_host_allowlist(
+        string_setting(&POSTLLM_HTTP_ALLOWED_HOSTS).as_deref(),
+        "postllm.http_allowed_hosts",
+    )
+}
+
+pub(crate) fn resolve_http_allowed_providers() -> Result<Vec<String>> {
+    parse_provider_safelist(
+        string_setting(&POSTLLM_HTTP_ALLOWED_PROVIDERS).as_deref(),
+        "postllm.http_allowed_providers",
+    )
+}
+
 /// Returns a JSON snapshot of the current backend-visible settings.
 pub(crate) fn snapshot() -> Value {
     json!({
@@ -674,6 +730,8 @@ pub(crate) fn snapshot() -> Value {
         "timeout_ms": POSTLLM_TIMEOUT_MS.get(),
         "max_retries": POSTLLM_MAX_RETRIES.get(),
         "retry_backoff_ms": POSTLLM_RETRY_BACKOFF_MS.get(),
+        "http_allowed_hosts": string_setting(&POSTLLM_HTTP_ALLOWED_HOSTS),
+        "http_allowed_providers": string_setting(&POSTLLM_HTTP_ALLOWED_PROVIDERS),
         "has_api_key": string_setting(&POSTLLM_API_KEY).is_some(),
         "api_key_source": api_key_source(),
         "api_key_secret": string_setting(&POSTLLM_API_KEY_SECRET),
@@ -977,6 +1035,61 @@ fn resolve_generation_alias(model: &str) -> Result<String> {
 fn resolve_embedding_alias(model: &str) -> Result<String> {
     crate::catalog::resolve_model_alias(model, crate::catalog::ModelAliasLane::Embedding)
         .map(|resolved| resolved.unwrap_or_else(|| model.to_owned()))
+}
+
+fn parse_host_allowlist(raw: Option<&str>, setting_name: &str) -> Result<Vec<String>> {
+    parse_csv_setting(raw)
+        .into_iter()
+        .map(|entry| {
+            if entry == "*" || entry.starts_with("*.") || is_valid_exact_host_entry(&entry) {
+                Ok(entry)
+            } else {
+                Err(Error::invalid_setting(
+                    setting_name,
+                    format!("contains invalid host entry '{entry}'"),
+                    format!(
+                        "SET {setting_name} = 'api.openai.com,host.docker.internal:11434,*.openai.com' or leave it empty"
+                    ),
+                ))
+            }
+        })
+        .collect()
+}
+
+fn parse_provider_safelist(raw: Option<&str>, setting_name: &str) -> Result<Vec<String>> {
+    parse_csv_setting(raw)
+        .into_iter()
+        .map(|entry| match entry.as_str() {
+            "*" | "openai" | "ollama" | "openai-compatible" => Ok(entry),
+            _ => Err(Error::invalid_setting(
+                setting_name,
+                format!("contains unsupported provider '{entry}'"),
+                format!("SET {setting_name} = 'openai,ollama,openai-compatible' or leave it empty"),
+            )),
+        })
+        .collect()
+}
+
+fn parse_csv_setting(raw: Option<&str>) -> Vec<String> {
+    raw.into_iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .collect()
+}
+
+fn is_valid_exact_host_entry(entry: &str) -> bool {
+    let candidate = if entry.contains(':') {
+        format!("http://{entry}")
+    } else {
+        format!("http://{entry}/")
+    };
+
+    reqwest::Url::parse(&candidate)
+        .ok()
+        .and_then(|url| url.host_str().map(|_| ()))
+        .is_some()
 }
 
 fn sanitize_non_blank_string(name: &str, value: Option<&str>) -> Result<Option<String>> {

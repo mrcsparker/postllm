@@ -133,7 +133,7 @@ Issues:
 
 - [x] `PL-037` Add a proper secret-management story for provider credentials.
 - [x] `PL-038` Add role-aware permission controls for runtimes, models, and privileged settings.
-- [ ] `PL-039` Add network allowlists and provider safelists for HTTP runtimes.
+- [x] `PL-039` Add network allowlists and provider safelists for HTTP runtimes.
 - [ ] `PL-040` Add request logging and audit trails with opt-in prompt/response redaction.
 - [ ] `PL-041` Add metrics views for latency, errors, token usage, and request counts.
 - [ ] `PL-042` Add quotas and guardrails for token budget, runtime budget, and spend.

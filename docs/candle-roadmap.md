@@ -37,6 +37,8 @@ Named configuration profiles, encrypted provider-secret references, and lane-awa
 
 Role-aware governance controls are now available through `postllm.permission_set(...)`, `postllm.permissions()`, and the shared runtime/model resolution path, so operators can allowlist runtimes, generation models, embedding models, and privileged setting changes per PostgreSQL role.
 
+Hosted HTTP governance now also includes `postllm.http_allowed_hosts` and `postllm.http_allowed_providers`, so operators can constrain outbound OpenAI-compatible traffic to specific hosts, ports, wildcard suffixes, and trusted provider identities.
+
 Reranking is now available through `postllm.rerank(...)`. On the Candle runtime it reuses the active local embedding model and scores candidates by local similarity. On the `openai` runtime it forwards a hosted rerank request to `postllm.base_url` and normalizes the returned ranked rows.
 
 ## Why Candle

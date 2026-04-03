@@ -110,6 +110,10 @@ pub(crate) struct Settings {
     pub(crate) max_retries: u32,
     /// Base backoff between transient HTTP retries in milliseconds.
     pub(crate) retry_backoff_ms: u64,
+    /// Optional host or host:port allowlist for hosted HTTP runtimes.
+    pub(crate) http_allowed_hosts: Vec<String>,
+    /// Optional provider safelist for hosted HTTP runtimes.
+    pub(crate) http_allowed_providers: Vec<String>,
     /// Optional cache directory for Candle-managed model assets.
     pub(crate) candle_cache_dir: Option<String>,
     /// Whether Candle should refuse all network fetches and use cached artifacts only.
@@ -962,6 +966,8 @@ mod tests {
             timeout_ms: 30_000,
             max_retries: 2,
             retry_backoff_ms: 250,
+            http_allowed_hosts: Vec::new(),
+            http_allowed_providers: Vec::new(),
             candle_cache_dir: None,
             candle_offline: false,
             candle_device: CandleDevice::Auto,
@@ -1028,6 +1034,8 @@ mod tests {
                 timeout_ms: 30_000,
                 max_retries: 2,
                 retry_backoff_ms: 250,
+                http_allowed_hosts: Vec::new(),
+                http_allowed_providers: Vec::new(),
                 candle_cache_dir: None,
                 candle_offline: false,
                 candle_device: CandleDevice::Auto,
@@ -1125,6 +1133,8 @@ mod tests {
                 timeout_ms: 30_000,
                 max_retries: 2,
                 retry_backoff_ms: 250,
+                http_allowed_hosts: Vec::new(),
+                http_allowed_providers: Vec::new(),
                 candle_cache_dir: None,
                 candle_offline: false,
                 candle_device: CandleDevice::Auto,

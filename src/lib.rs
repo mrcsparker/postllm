@@ -5894,6 +5894,8 @@ mod tests {
                 "timeout_ms": 30_000,
                 "max_retries": 2,
                 "retry_backoff_ms": 250,
+                "http_allowed_hosts": null,
+                "http_allowed_providers": null,
                 "has_api_key": false,
                 "api_key_source": "none",
                 "api_key_secret": null,
@@ -5950,6 +5952,54 @@ mod tests {
                     }
                 },
             })
+        );
+    }
+
+    #[pg_test]
+    fn sql_configure_should_allow_hosted_endpoints_on_matching_host_allowlist() {
+        sql_run("SET LOCAL postllm.http_allowed_hosts = '*.openai.com'");
+
+        let configured = sql_json(
+            "SELECT postllm.configure(
+                runtime => 'openai',
+                base_url => 'https://api.openai.com/v1/chat/completions'
+            )",
+        );
+
+        assert_eq!(
+            configured["base_url"],
+            "https://api.openai.com/v1/chat/completions"
+        );
+    }
+
+    #[pg_test]
+    #[should_panic(
+        expected = "postllm.base_url host 'api.openai.com' is not permitted by postllm.http_allowed_hosts"
+    )]
+    fn sql_configure_should_reject_hosted_endpoints_outside_host_allowlist() {
+        sql_run("SET LOCAL postllm.http_allowed_hosts = 'host.docker.internal:11434'");
+
+        drop(Spi::get_one::<JsonB>(
+            "SELECT postllm.configure(
+                runtime => 'openai',
+                base_url => 'https://api.openai.com/v1/chat/completions'
+            )",
+        ));
+    }
+
+    #[pg_test]
+    fn sql_runtime_discover_should_report_disallowed_hosted_provider_safelist() {
+        sql_run("SET LOCAL postllm.http_allowed_providers = 'ollama'");
+        sql_run("SET LOCAL postllm.base_url = 'https://api.openai.com/v1/chat/completions'");
+        sql_run("SET LOCAL postllm.runtime = 'openai'");
+
+        let discovery = sql_json("SELECT postllm.runtime_discover()");
+
+        assert_eq!(discovery["ready"], false);
+        assert!(
+            discovery["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("provider 'openai' is not permitted"))
         );
     }
 

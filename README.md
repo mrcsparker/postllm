@@ -136,6 +136,8 @@ The extension exposes `PostgreSQL` settings that work naturally with `SET`, `ALT
 - `postllm.timeout_ms`
 - `postllm.max_retries`
 - `postllm.retry_backoff_ms`
+- `postllm.http_allowed_hosts`
+- `postllm.http_allowed_providers`
 - `postllm.candle_cache_dir`
 - `postllm.candle_offline`
 - `postllm.candle_device`
@@ -188,6 +190,8 @@ Application roles can then use `postllm.profile_apply(...)` or `postllm.configur
 
 When you need governance on top of that workflow, `postllm.permission_set(...)` adds role-aware allowlists for `runtime`, `generation_model`, `embedding_model`, and privileged `setting` changes. Runtime and model permissions become category-wide allowlists once any rule exists, while setting permissions protect non-default changes for the named setting. Use `target => '*'` to grant every runtime, model, or privileged setting within that object type.
 
+For outbound hosted traffic, operators can also set `postllm.http_allowed_hosts` and `postllm.http_allowed_providers` as superuser-controlled GUCs. `postllm.http_allowed_hosts` accepts comma-separated `host`, `host:port`, or `*.suffix` entries. `postllm.http_allowed_providers` accepts `openai`, `ollama`, and `openai-compatible`. Empty means unrestricted.
+
 ```sql
 SELECT postllm.permission_set(
     role_name => 'app_runtime_openai',
@@ -202,6 +206,9 @@ SELECT postllm.permission_set(
     target => 'base_url',
     description => 'Application role may switch hosted endpoints'
 );
+
+ALTER SYSTEM SET postllm.http_allowed_hosts = 'api.openai.com,host.docker.internal:11434';
+ALTER SYSTEM SET postllm.http_allowed_providers = 'openai,ollama';
 ```
 
 For reusable model shorthands, `postllm.model_alias_set(...)` stores lane-aware generation and embedding aliases. Once defined, aliases resolve automatically through `postllm.capabilities()`, `postllm.chat(...)`, `postllm.complete(...)`, `postllm.embed(...)`, `postllm.embedding_model_info(...)`, rerank helpers, and local model lifecycle commands.

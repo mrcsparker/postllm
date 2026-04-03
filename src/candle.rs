@@ -4145,6 +4145,8 @@ mod tests {
                 timeout_ms: 30_000,
                 max_retries: 2,
                 retry_backoff_ms: 250,
+                http_allowed_hosts: Vec::new(),
+                http_allowed_providers: Vec::new(),
                 candle_cache_dir: None,
                 candle_offline: false,
                 candle_device: CandleDevice::Auto,
