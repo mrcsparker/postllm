@@ -1413,11 +1413,26 @@ struct LocalModelTarget {
     lane: candle::LocalModelLane,
 }
 
+#[derive(Debug, Clone)]
+struct LocalModelRequestContext {
+    target: LocalModelTarget,
+    candle_cache_dir: Option<String>,
+    candle_offline: bool,
+    candle_device: backend::CandleDevice,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LocalModelLaneSelector {
     Auto,
     Embedding,
     Generation,
+}
+
+#[derive(Debug, Clone)]
+struct CandleGenerationReadiness {
+    ready: bool,
+    cold_start: bool,
+    reason: Option<String>,
 }
 
 type RankRow = (i32, i32, String, f64);
@@ -2009,95 +2024,59 @@ fn embedding_model_info_impl(model: Option<&str>) -> Result<Value> {
 }
 
 fn model_install_impl(model: Option<&str>, lane: Option<&str>) -> Result<Value> {
-    guc::ensure_active_privileged_settings_allowed()?;
-    let target = resolve_local_model_target(model, lane)?;
-    let candle_cache_dir = guc::resolve_candle_cache_dir();
-    let candle_offline = guc::resolve_candle_offline();
-    let candle_device = guc::resolve_candle_device()?;
-
+    let request = resolve_local_model_request(model, lane)?;
     candle::install_model(
-        &target.model,
-        target.lane,
-        candle_cache_dir.as_deref(),
-        candle_offline,
-        candle_device,
+        &request.target.model,
+        request.target.lane,
+        request.candle_cache_dir.as_deref(),
+        request.candle_offline,
+        request.candle_device,
     )
 }
 
 fn model_prewarm_impl(model: Option<&str>, lane: Option<&str>) -> Result<Value> {
-    guc::ensure_active_privileged_settings_allowed()?;
-    let target = resolve_local_model_target(model, lane)?;
-    let candle_cache_dir = guc::resolve_candle_cache_dir();
-    let candle_offline = guc::resolve_candle_offline();
-    let candle_device = guc::resolve_candle_device()?;
-
+    let request = resolve_local_model_request(model, lane)?;
     candle::prewarm_model(
-        &target.model,
-        target.lane,
-        candle_cache_dir.as_deref(),
-        candle_offline,
-        candle_device,
+        &request.target.model,
+        request.target.lane,
+        request.candle_cache_dir.as_deref(),
+        request.candle_offline,
+        request.candle_device,
     )
 }
 
 fn model_inspect_impl(model: Option<&str>, lane: Option<&str>) -> Result<Value> {
-    guc::ensure_active_privileged_settings_allowed()?;
-    let target = resolve_local_model_target(model, lane)?;
-    let candle_cache_dir = guc::resolve_candle_cache_dir();
-    let candle_offline = guc::resolve_candle_offline();
-    let candle_device = guc::resolve_candle_device()?;
-
+    let request = resolve_local_model_request(model, lane)?;
     candle::inspect_model(
-        &target.model,
-        target.lane,
-        candle_cache_dir.as_deref(),
-        candle_offline,
-        candle_device,
+        &request.target.model,
+        request.target.lane,
+        request.candle_cache_dir.as_deref(),
+        request.candle_offline,
+        request.candle_device,
     )
 }
 
 fn model_evict_impl(model: Option<&str>, lane: Option<&str>, scope: &str) -> Result<Value> {
-    guc::ensure_active_privileged_settings_allowed()?;
-    let target = resolve_local_model_target(model, lane)?;
+    let request = resolve_local_model_request(model, lane)?;
     let scope = parse_local_model_evict_scope(scope)?;
-    let candle_cache_dir = guc::resolve_candle_cache_dir();
-    let candle_offline = guc::resolve_candle_offline();
-    let candle_device = guc::resolve_candle_device()?;
 
     candle::evict_model(
-        &target.model,
-        target.lane,
+        &request.target.model,
+        request.target.lane,
         scope,
-        candle_cache_dir.as_deref(),
-        candle_offline,
-        candle_device,
+        request.candle_cache_dir.as_deref(),
+        request.candle_offline,
+        request.candle_device,
     )
 }
 
 fn runtime_discover_impl() -> Value {
     match guc::resolve(None) {
         Ok(settings) => match settings.runtime {
-            backend::Runtime::OpenAi => {
-                let mut discovery = client::discover_openai_runtime(&settings);
-                if let Some(object) = discovery.as_object_mut() {
-                    object.insert(
-                        "execution_environment".to_owned(),
-                        json!(execution_environment()),
-                    );
-                }
-                discovery
-            }
+            backend::Runtime::OpenAi => discover_hosted_runtime(&settings),
             backend::Runtime::Candle => discover_candle_runtime(&settings),
         },
-        Err(error) => json!({
-            "runtime": guc::snapshot().get("runtime").cloned().unwrap_or(Value::Null),
-            "provider": Value::Null,
-            "ready": false,
-            "reason": error.to_string(),
-            "execution_environment": execution_environment(),
-            "settings": guc::snapshot(),
-            "capabilities": guc::capabilities_snapshot(),
-        }),
+        Err(error) => runtime_discover_error(error),
     }
 }
 
@@ -2116,72 +2095,145 @@ fn execution_environment() -> &'static str {
     }
 }
 
+fn resolve_local_model_request(
+    model: Option<&str>,
+    lane: Option<&str>,
+) -> Result<LocalModelRequestContext> {
+    guc::ensure_active_privileged_settings_allowed()?;
+
+    Ok(LocalModelRequestContext {
+        target: resolve_local_model_target(model, lane)?,
+        candle_cache_dir: guc::resolve_candle_cache_dir(),
+        candle_offline: guc::resolve_candle_offline(),
+        candle_device: guc::resolve_candle_device()?,
+    })
+}
+
+fn discover_hosted_runtime(settings: &backend::Settings) -> Value {
+    attach_execution_environment(client::discover_openai_runtime(settings))
+}
+
+fn runtime_discover_error(error: Error) -> Value {
+    json!({
+        "runtime": guc::snapshot().get("runtime").cloned().unwrap_or(Value::Null),
+        "provider": Value::Null,
+        "ready": false,
+        "reason": error.to_string(),
+        "execution_environment": execution_environment(),
+        "settings": guc::snapshot(),
+        "capabilities": guc::capabilities_snapshot(),
+    })
+}
+
+fn attach_execution_environment(mut discovery: Value) -> Value {
+    if let Some(object) = discovery.as_object_mut() {
+        object.insert(
+            "execution_environment".to_owned(),
+            json!(execution_environment()),
+        );
+    }
+
+    discovery
+}
+
 fn discover_candle_runtime(settings: &backend::Settings) -> Value {
     let embedding_model = match guc::resolve_embedding_model(None) {
         Ok(model) => model,
-        Err(error) => {
-            return json!({
-                "runtime": settings.runtime.as_str(),
-                "provider": "candle",
-                "ready": false,
-                "reason": error.to_string(),
-                "execution_environment": execution_environment(),
-                "model": settings.model,
-                "embedding_model": Value::Null,
-                "offline": settings.candle_offline,
-                "capabilities": guc::capabilities_snapshot(),
-            });
-        }
+        Err(error) => return candle_runtime_failure(settings, None, error, None),
     };
-    let cache_dir = settings.candle_cache_dir.as_deref();
-
-    let generation = match candle::inspect_model(
+    let generation = match inspect_candle_model(
         &settings.model,
         candle::LocalModelLane::Generation,
-        cache_dir,
-        settings.candle_offline,
-        settings.candle_device,
+        settings,
     ) {
         Ok(snapshot) => snapshot,
-        Err(error) => {
-            return json!({
-                "runtime": settings.runtime.as_str(),
-                "provider": "candle",
-                "ready": false,
-                "reason": error.to_string(),
-                "execution_environment": execution_environment(),
-                "model": settings.model,
-                "embedding_model": embedding_model,
-                "offline": settings.candle_offline,
-                "capabilities": backend::CapabilitySnapshot::from_settings(settings, Some(&embedding_model)).snapshot(),
-            });
-        }
+        Err(error) => return candle_runtime_failure(settings, Some(&embedding_model), error, None),
     };
-
-    let embedding = match candle::inspect_model(
+    let embedding = match inspect_candle_model(
         &embedding_model,
         candle::LocalModelLane::Embedding,
-        cache_dir,
-        settings.candle_offline,
-        settings.candle_device,
+        settings,
     ) {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            return json!({
-                "runtime": settings.runtime.as_str(),
-                "provider": "candle",
-                "ready": false,
-                "reason": error.to_string(),
-                "execution_environment": execution_environment(),
-                "model": settings.model,
-                "embedding_model": embedding_model,
-                "offline": settings.candle_offline,
-                "capabilities": backend::CapabilitySnapshot::from_settings(settings, Some(&embedding_model)).snapshot(),
-                "generation": generation,
-            });
+            return candle_runtime_failure(
+                settings,
+                Some(&embedding_model),
+                error,
+                Some(generation),
+            );
         }
     };
+    let readiness = candle_generation_readiness(settings, &generation);
 
+    json!({
+        "runtime": settings.runtime.as_str(),
+        "provider": "candle",
+        "ready": readiness.ready,
+        "reason": readiness.reason,
+        "execution_environment": execution_environment(),
+        "model": settings.model,
+        "embedding_model": embedding_model,
+        "offline": settings.candle_offline,
+        "cold_start": readiness.cold_start,
+        "capabilities": candle_runtime_capabilities(settings, Some(&embedding_model)),
+        "generation": generation,
+        "embedding": embedding,
+    })
+}
+
+fn inspect_candle_model(
+    model: &str,
+    lane: candle::LocalModelLane,
+    settings: &backend::Settings,
+) -> Result<Value> {
+    candle::inspect_model(
+        model,
+        lane,
+        settings.candle_cache_dir.as_deref(),
+        settings.candle_offline,
+        settings.candle_device,
+    )
+}
+
+fn candle_runtime_failure(
+    settings: &backend::Settings,
+    embedding_model: Option<&str>,
+    error: Error,
+    generation: Option<Value>,
+) -> Value {
+    let mut discovery = json!({
+        "runtime": settings.runtime.as_str(),
+        "provider": "candle",
+        "ready": false,
+        "reason": error.to_string(),
+        "execution_environment": execution_environment(),
+        "model": settings.model,
+        "embedding_model": embedding_model,
+        "offline": settings.candle_offline,
+        "capabilities": candle_runtime_capabilities(settings, embedding_model),
+    });
+
+    if let Some(generation) = generation
+        && let Some(object) = discovery.as_object_mut()
+    {
+        object.insert("generation".to_owned(), generation);
+    }
+
+    discovery
+}
+
+fn candle_runtime_capabilities(
+    settings: &backend::Settings,
+    embedding_model: Option<&str>,
+) -> Value {
+    backend::CapabilitySnapshot::from_settings(settings, embedding_model).snapshot()
+}
+
+fn candle_generation_readiness(
+    settings: &backend::Settings,
+    generation: &Value,
+) -> CandleGenerationReadiness {
     let generation_device_available = generation
         .get("device")
         .and_then(|device| device.get("available"))
@@ -2200,47 +2252,57 @@ fn discover_candle_runtime(settings: &backend::Settings) -> Value {
             .get("memory_cached")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-    let cold_start = !generation_cached;
     let cache_ready = !settings.candle_offline || generation_cached;
-    let ready = generation_device_available && generation_supported && cache_ready;
-    let reason = if !generation_device_available {
-        generation
+
+    CandleGenerationReadiness {
+        ready: generation_device_available && generation_supported && cache_ready,
+        cold_start: !generation_cached,
+        reason: candle_generation_unready_reason(
+            settings,
+            generation,
+            generation_device_available,
+            generation_supported,
+            cache_ready,
+        ),
+    }
+}
+
+fn candle_generation_unready_reason(
+    settings: &backend::Settings,
+    generation: &Value,
+    generation_device_available: bool,
+    generation_supported: bool,
+    cache_ready: bool,
+) -> Option<String> {
+    if !generation_device_available {
+        return generation
             .get("device")
             .and_then(|device| device.get("reason"))
             .and_then(Value::as_str)
             .map(str::to_owned)
-            .or_else(|| Some("the requested Candle device is not available".to_owned()))
-    } else if !generation_supported {
-        guc::capabilities_snapshot()
+            .or_else(|| Some("the requested Candle device is not available".to_owned()));
+    }
+
+    if !generation_supported {
+        return guc::capabilities_snapshot()
             .get("features")
             .and_then(|features| features.get("chat"))
             .and_then(|chat| chat.get("reason"))
             .and_then(Value::as_str)
             .map(str::to_owned)
-            .or_else(|| Some("the configured Candle generation model is not supported".to_owned()))
-    } else if !cache_ready {
-        Some(format!(
+            .or_else(|| {
+                Some("the configured Candle generation model is not supported".to_owned())
+            });
+    }
+
+    if !cache_ready {
+        return Some(format!(
             "postllm.candle_offline is enabled and model '{}' is not cached locally",
             settings.model
-        ))
-    } else {
-        None
-    };
+        ));
+    }
 
-    json!({
-        "runtime": settings.runtime.as_str(),
-        "provider": "candle",
-        "ready": ready,
-        "reason": reason,
-        "execution_environment": execution_environment(),
-        "model": settings.model,
-        "embedding_model": embedding_model,
-        "offline": settings.candle_offline,
-        "cold_start": cold_start,
-        "capabilities": backend::CapabilitySnapshot::from_settings(settings, Some(&embedding_model)).snapshot(),
-        "generation": generation,
-        "embedding": embedding,
-    })
+    None
 }
 
 fn resolve_local_model_target(model: Option<&str>, lane: Option<&str>) -> Result<LocalModelTarget> {
