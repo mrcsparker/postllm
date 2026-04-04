@@ -5,12 +5,12 @@
 
 use crate::backend::Runtime;
 use crate::error::{Error, Result};
+use crate::operator_policy;
 use pgrx::JsonB;
 use pgrx::datum::DatumWithOid;
 use pgrx::pg_sys;
 use pgrx::spi::Spi;
 use serde_json::Value;
-use std::ffi::CStr;
 
 const WILDCARD_TARGET: &str = "*";
 const PRIVILEGED_SETTINGS: [&str; 11] = [
@@ -244,14 +244,11 @@ pub(crate) fn ensure_setting_change_allowed(setting_name: &str) -> Result<()> {
 
 #[must_use]
 pub(crate) fn caller_is_superuser() -> bool {
-    unsafe { pg_sys::superuser_arg(caller_role_oid()) }
+    operator_policy::caller_is_superuser()
 }
 
 pub(crate) fn caller_role_name() -> String {
-    unsafe {
-        let ptr = pg_sys::GetUserNameFromId(caller_role_oid(), false);
-        CStr::from_ptr(ptr).to_string_lossy().into_owned()
-    }
+    operator_policy::caller_role_name()
 }
 
 fn ensure_allowed(
@@ -448,5 +445,5 @@ fn denied_fix_suffix(object_type: PermissionObjectType) -> &'static str {
 }
 
 fn caller_role_oid() -> pg_sys::Oid {
-    unsafe { pg_sys::GetOuterUserId() }
+    operator_policy::caller_role_oid()
 }

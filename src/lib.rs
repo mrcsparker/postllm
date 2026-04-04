@@ -8,6 +8,7 @@ pub(crate) mod error;
 pub(crate) mod guc;
 pub(crate) mod http_policy;
 pub(crate) mod interrupt;
+pub(crate) mod operator_policy;
 pub(crate) mod permissions;
 pub(crate) mod secrets;
 
@@ -1883,34 +1884,34 @@ fn profile_impl(name: &str) -> Result<Value> {
 }
 
 fn secrets_impl() -> Result<Value> {
-    require_superuser("postllm.secrets")?;
-    catalog::secrets()
+    operator_policy::run_operator_operation("postllm.secrets", catalog::secrets)
 }
 
 fn secret_impl(name: &str) -> Result<Value> {
-    require_superuser("postllm.secret")?;
-    catalog::secret(name)
+    operator_policy::run_operator_operation("postllm.secret", || catalog::secret(name))
 }
 
 fn secret_set_impl(name: &str, value: &str, description: Option<&str>) -> Result<Value> {
-    require_superuser("postllm.secret_set")?;
-    catalog::secret_set(name, value, description)
+    operator_policy::run_operator_operation("postllm.secret_set", || {
+        catalog::secret_set(name, value, description)
+    })
 }
 
 fn secret_delete_impl(name: &str) -> Result<Value> {
-    require_superuser("postllm.secret_delete")?;
-    catalog::secret_delete(name)
+    operator_policy::run_operator_operation("postllm.secret_delete", || {
+        catalog::secret_delete(name)
+    })
 }
 
 fn permissions_impl() -> Result<Value> {
-    require_superuser("postllm.permissions")?;
-    permissions::permissions()
+    operator_policy::run_operator_operation("postllm.permissions", permissions::permissions)
 }
 
 fn permission_impl(role_name: &str, object_type: &str, target: &str) -> Result<Value> {
-    require_superuser("postllm.permission")?;
-    let object_type = permissions::PermissionObjectType::parse("object_type", object_type)?;
-    permissions::permission(role_name, object_type, target)
+    operator_policy::run_operator_operation("postllm.permission", || {
+        let object_type = permissions::PermissionObjectType::parse("object_type", object_type)?;
+        permissions::permission(role_name, object_type, target)
+    })
 }
 
 fn permission_set_impl(
@@ -1919,15 +1920,17 @@ fn permission_set_impl(
     target: &str,
     description: Option<&str>,
 ) -> Result<Value> {
-    require_superuser("postllm.permission_set")?;
-    let object_type = permissions::PermissionObjectType::parse("object_type", object_type)?;
-    permissions::permission_set(role_name, object_type, target, description)
+    operator_policy::run_operator_operation("postllm.permission_set", || {
+        let object_type = permissions::PermissionObjectType::parse("object_type", object_type)?;
+        permissions::permission_set(role_name, object_type, target, description)
+    })
 }
 
 fn permission_delete_impl(role_name: &str, object_type: &str, target: &str) -> Result<Value> {
-    require_superuser("postllm.permission_delete")?;
-    let object_type = permissions::PermissionObjectType::parse("object_type", object_type)?;
-    permissions::permission_delete(role_name, object_type, target)
+    operator_policy::run_operator_operation("postllm.permission_delete", || {
+        let object_type = permissions::PermissionObjectType::parse("object_type", object_type)?;
+        permissions::permission_delete(role_name, object_type, target)
+    })
 }
 
 #[expect(
@@ -1977,17 +1980,6 @@ fn profile_apply_impl(name: &str) -> Result<Value> {
 
 fn profile_delete_impl(name: &str) -> Result<Value> {
     catalog::profile_delete(name)
-}
-
-fn require_superuser(function_name: &str) -> Result<()> {
-    if permissions::caller_is_superuser() {
-        Ok(())
-    } else {
-        let role_name = permissions::caller_role_name();
-        Err(Error::Config(format!(
-            "{function_name}(...) requires a PostgreSQL superuser for role '{role_name}'; fix: run it as a superuser and let application roles use postllm.configure(api_key_secret => ...) or postllm.profile_apply(...)"
-        )))
-    }
 }
 
 fn model_aliases_impl() -> Result<Value> {
