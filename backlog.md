@@ -202,7 +202,7 @@ Exit criteria:
 Issues:
 
 - [x] `PL-061` Refactor the session-settings and runtime-resolution path into smaller focused units with a clear data flow from GUCs to validated request settings.
-- [ ] `PL-062` Split hosted HTTP endpoint policy, provider inference, and discovery logic into a cohesive policy module so URL parsing and enforcement are not scattered across `guc`, `client`, and `backend`.
+- [x] `PL-062` Split hosted HTTP endpoint policy, provider inference, and discovery logic into a cohesive policy module so URL parsing and enforcement are not scattered across `guc`, `client`, and `backend`.
 - [ ] `PL-063` Reduce repetitive `Settings` construction and test fixture boilerplate across Rust unit tests and `pg_test` coverage with shared builders/helpers.
 - [ ] `PL-064` Break up long SQL entrypoint and helper functions in `src/lib.rs` so each function does one thing and cross-cutting concerns are pushed into narrower modules.
 - [ ] `PL-065` Standardize operator-policy code around one obvious pattern for secrets, permissions, network policy, quotas, and future governance controls.

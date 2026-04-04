@@ -464,7 +464,7 @@ pub(crate) fn resolve(model_override: Option<&str>) -> Result<Settings> {
     ensure_active_privileged_settings_allowed()?;
     let settings = inputs.into_settings(runtime, model);
 
-    crate::client::enforce_http_endpoint_policy(&settings)?;
+    crate::http_policy::enforce_settings(&settings)?;
 
     Ok(settings)
 }
@@ -478,7 +478,7 @@ pub(crate) fn resolve_rerank(model_override: Option<&str>) -> Result<Settings> {
     ensure_active_privileged_settings_allowed()?;
     let settings = inputs.into_settings(runtime, model);
 
-    crate::client::enforce_http_endpoint_policy(&settings)?;
+    crate::http_policy::enforce_settings(&settings)?;
 
     Ok(settings)
 }
@@ -542,14 +542,14 @@ pub(crate) fn resolve_candle_device() -> Result<CandleDevice> {
 }
 
 pub(crate) fn resolve_http_allowed_hosts() -> Result<Vec<String>> {
-    parse_host_allowlist(
+    crate::http_policy::parse_allowed_hosts(
         string_setting(&POSTLLM_HTTP_ALLOWED_HOSTS).as_deref(),
         "postllm.http_allowed_hosts",
     )
 }
 
 pub(crate) fn resolve_http_allowed_providers() -> Result<Vec<String>> {
-    parse_provider_safelist(
+    crate::http_policy::parse_allowed_providers(
         string_setting(&POSTLLM_HTTP_ALLOWED_PROVIDERS).as_deref(),
         "postllm.http_allowed_providers",
     )
@@ -1033,61 +1033,6 @@ fn resolve_generation_alias(model: &str) -> Result<String> {
 fn resolve_embedding_alias(model: &str) -> Result<String> {
     crate::catalog::resolve_model_alias(model, crate::catalog::ModelAliasLane::Embedding)
         .map(|resolved| resolved.unwrap_or_else(|| model.to_owned()))
-}
-
-fn parse_host_allowlist(raw: Option<&str>, setting_name: &str) -> Result<Vec<String>> {
-    parse_csv_setting(raw)
-        .into_iter()
-        .map(|entry| {
-            if entry == "*" || entry.starts_with("*.") || is_valid_exact_host_entry(&entry) {
-                Ok(entry)
-            } else {
-                Err(Error::invalid_setting(
-                    setting_name,
-                    format!("contains invalid host entry '{entry}'"),
-                    format!(
-                        "SET {setting_name} = 'api.openai.com,host.docker.internal:11434,*.openai.com' or leave it empty"
-                    ),
-                ))
-            }
-        })
-        .collect()
-}
-
-fn parse_provider_safelist(raw: Option<&str>, setting_name: &str) -> Result<Vec<String>> {
-    parse_csv_setting(raw)
-        .into_iter()
-        .map(|entry| match entry.as_str() {
-            "*" | "openai" | "ollama" | "openai-compatible" => Ok(entry),
-            _ => Err(Error::invalid_setting(
-                setting_name,
-                format!("contains unsupported provider '{entry}'"),
-                format!("SET {setting_name} = 'openai,ollama,openai-compatible' or leave it empty"),
-            )),
-        })
-        .collect()
-}
-
-fn parse_csv_setting(raw: Option<&str>) -> Vec<String> {
-    raw.into_iter()
-        .flat_map(|value| value.split(','))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_ascii_lowercase())
-        .collect()
-}
-
-fn is_valid_exact_host_entry(entry: &str) -> bool {
-    let candidate = if entry.contains(':') {
-        format!("http://{entry}")
-    } else {
-        format!("http://{entry}/")
-    };
-
-    reqwest::Url::parse(&candidate)
-        .ok()
-        .and_then(|url| url.host_str().map(|_| ()))
-        .is_some()
 }
 
 fn sanitize_non_blank_string(name: &str, value: Option<&str>) -> Result<Option<String>> {

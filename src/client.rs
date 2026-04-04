@@ -122,10 +122,16 @@ pub(crate) fn chat_stream_response(
 /// Probes the configured OpenAI-compatible runtime and reports discovery metadata.
 #[must_use]
 pub(crate) fn discover_openai_runtime(settings: &crate::backend::Settings) -> Value {
-    if let Err(error) = enforce_http_endpoint_policy(settings) {
+    let endpoint = crate::http_policy::summarize(settings);
+    let provider = endpoint.provider.clone();
+    let base_url_host = endpoint.base_url_host.clone();
+    let base_url_kind = endpoint.base_url_kind;
+    let discovery_url = endpoint.discovery_url.clone();
+
+    if let Err(error) = crate::http_policy::enforce_settings(settings) {
         return json!({
             "runtime": settings.runtime.as_str(),
-            "provider": crate::backend::provider_identity(settings),
+            "provider": provider,
             "ready": false,
             "reason": error.to_string(),
             "base_url": settings.base_url.as_deref(),
@@ -136,12 +142,11 @@ pub(crate) fn discover_openai_runtime(settings: &crate::backend::Settings) -> Va
             "model": settings.model.as_str(),
             "model_listed": Value::Null,
             "listed_models": Vec::<String>::new(),
-            "base_url_host": settings.base_url.as_deref().and_then(base_url_host),
-            "base_url_kind": settings.base_url.as_deref().and_then(classify_base_url_kind),
+            "base_url_host": base_url_host,
+            "base_url_kind": base_url_kind,
         });
     }
 
-    let provider = crate::backend::provider_identity(settings);
     let Some(base_url) = settings.base_url.as_deref() else {
         return json!({
             "runtime": settings.runtime.as_str(),
@@ -161,7 +166,7 @@ pub(crate) fn discover_openai_runtime(settings: &crate::backend::Settings) -> Va
         });
     };
 
-    let Some(discovery_url) = derive_models_url(base_url) else {
+    let Some(discovery_url) = discovery_url else {
         return json!({
             "runtime": settings.runtime.as_str(),
             "provider": provider,
@@ -175,8 +180,8 @@ pub(crate) fn discover_openai_runtime(settings: &crate::backend::Settings) -> Va
             "model": settings.model,
             "model_listed": Value::Null,
             "listed_models": Vec::<String>::new(),
-            "base_url_host": base_url_host(base_url),
-            "base_url_kind": classify_base_url_kind(base_url),
+            "base_url_host": base_url_host,
+            "base_url_kind": base_url_kind,
         });
     };
 
@@ -200,8 +205,8 @@ pub(crate) fn discover_openai_runtime(settings: &crate::backend::Settings) -> Va
                 "model": settings.model,
                 "model_listed": Value::Null,
                 "listed_models": Vec::<String>::new(),
-                "base_url_host": base_url_host(base_url),
-                "base_url_kind": classify_base_url_kind(base_url),
+                "base_url_host": base_url_host,
+                "base_url_kind": base_url_kind,
             });
         }
     };
@@ -227,8 +232,8 @@ pub(crate) fn discover_openai_runtime(settings: &crate::backend::Settings) -> Va
                 "model": settings.model,
                 "model_listed": Value::Null,
                 "listed_models": Vec::<String>::new(),
-                "base_url_host": base_url_host(base_url),
-                "base_url_kind": classify_base_url_kind(base_url),
+                "base_url_host": base_url_host,
+                "base_url_kind": base_url_kind,
             });
         }
     };
@@ -255,8 +260,8 @@ pub(crate) fn discover_openai_runtime(settings: &crate::backend::Settings) -> Va
                 "model": settings.model,
                 "model_listed": Value::Null,
                 "listed_models": Vec::<String>::new(),
-                "base_url_host": base_url_host(base_url),
-                "base_url_kind": classify_base_url_kind(base_url),
+                "base_url_host": base_url_host,
+                "base_url_kind": base_url_kind,
             });
         }
     };
@@ -275,8 +280,8 @@ pub(crate) fn discover_openai_runtime(settings: &crate::backend::Settings) -> Va
             "model": settings.model,
             "model_listed": Value::Null,
             "listed_models": Vec::<String>::new(),
-            "base_url_host": base_url_host(base_url),
-            "base_url_kind": classify_base_url_kind(base_url),
+            "base_url_host": base_url_host,
+            "base_url_kind": base_url_kind,
         });
     }
 
@@ -296,8 +301,8 @@ pub(crate) fn discover_openai_runtime(settings: &crate::backend::Settings) -> Va
                 "model": settings.model,
                 "model_listed": Value::Null,
                 "listed_models": Vec::<String>::new(),
-                "base_url_host": base_url_host(base_url),
-                "base_url_kind": classify_base_url_kind(base_url),
+                "base_url_host": base_url_host,
+                "base_url_kind": base_url_kind,
             });
         }
     };
@@ -331,8 +336,8 @@ pub(crate) fn discover_openai_runtime(settings: &crate::backend::Settings) -> Va
         "model": settings.model,
         "model_listed": model_listed,
         "listed_models": listed_models,
-        "base_url_host": base_url_host(base_url),
-        "base_url_kind": classify_base_url_kind(base_url),
+        "base_url_host": base_url_host,
+        "base_url_kind": base_url_kind,
     })
 }
 
@@ -358,36 +363,6 @@ fn execute_chat_response(
     })
 }
 
-fn derive_models_url(base_url: &str) -> Option<String> {
-    let mut url = reqwest::Url::parse(base_url).ok()?;
-    let mut segments = url
-        .path_segments()?
-        .map(str::to_owned)
-        .collect::<Vec<String>>();
-
-    if matches!(segments.last().map(String::as_str), Some("completions")) {
-        segments.pop();
-    }
-    if matches!(segments.last().map(String::as_str), Some("chat")) {
-        segments.pop();
-    }
-    if matches!(
-        segments.last().map(String::as_str),
-        Some("responses" | "embeddings" | "rerank")
-    ) {
-        segments.pop();
-    }
-    if segments.is_empty() {
-        segments.push("v1".to_owned());
-    }
-    if !matches!(segments.last().map(String::as_str), Some("models")) {
-        segments.push("models".to_owned());
-    }
-
-    url.set_path(&format!("/{}", segments.join("/")));
-    Some(url.to_string())
-}
-
 fn extract_model_ids(response: &Value) -> Vec<String> {
     response
         .get("data")
@@ -401,90 +376,6 @@ fn extract_model_ids(response: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub(crate) fn enforce_http_endpoint_policy(settings: &crate::backend::Settings) -> Result<()> {
-    if settings.runtime != crate::backend::Runtime::OpenAi {
-        return Ok(());
-    }
-
-    let Some(base_url) = settings.base_url.as_deref() else {
-        return Ok(());
-    };
-
-    if !host_is_allowed(base_url, &settings.http_allowed_hosts)? {
-        let host = base_url_host(base_url).unwrap_or_else(|| "<unknown>".to_owned());
-        return Err(Error::Config(format!(
-            "postllm.base_url host '{host}' is not permitted by postllm.http_allowed_hosts; fix: point postllm.base_url at an allowed host or SET postllm.http_allowed_hosts = '{host}'"
-        )));
-    }
-
-    let provider = crate::backend::provider_identity(settings);
-    if !provider_is_allowed(&provider, &settings.http_allowed_providers) {
-        return Err(Error::Config(format!(
-            "provider '{provider}' is not permitted by postllm.http_allowed_providers; fix: point postllm.base_url at an allowed provider or SET postllm.http_allowed_providers = '{provider}'"
-        )));
-    }
-
-    Ok(())
-}
-
-fn base_url_host(base_url: &str) -> Option<String> {
-    reqwest::Url::parse(base_url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_owned))
-}
-
-fn classify_base_url_kind(base_url: &str) -> Option<&'static str> {
-    let host = reqwest::Url::parse(base_url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_owned))?;
-
-    Some(match host.as_str() {
-        "host.docker.internal" => "docker-host",
-        "127.0.0.1" | "localhost" => "loopback",
-        _ => "remote",
-    })
-}
-
-fn host_is_allowed(base_url: &str, allowed_hosts: &[String]) -> Result<bool> {
-    if allowed_hosts.is_empty() || allowed_hosts.iter().any(|entry| entry == "*") {
-        return Ok(true);
-    }
-
-    let url = reqwest::Url::parse(base_url).map_err(|_| {
-        Error::invalid_setting(
-            "postllm.base_url",
-            format!("must be a valid absolute URL, got '{base_url}'"),
-            "SET postllm.base_url = 'http://127.0.0.1:11434/v1/chat/completions' or another valid absolute URL",
-        )
-    })?;
-    let host = url.host_str().ok_or_else(|| {
-        Error::invalid_setting(
-            "postllm.base_url",
-            format!("must include a hostname, got '{base_url}'"),
-            "SET postllm.base_url = 'http://127.0.0.1:11434/v1/chat/completions' or another URL with a host",
-        )
-    })?;
-    let port = url.port_or_known_default();
-    let host_and_port = port.map(|port| format!("{host}:{port}"));
-
-    Ok(allowed_hosts.iter().any(|entry| {
-        if let Some(suffix) = entry.strip_prefix("*.") {
-            host == suffix || host.ends_with(&format!(".{suffix}"))
-        } else if let Some(host_and_port) = host_and_port.as_deref() {
-            entry == host || entry == host_and_port
-        } else {
-            entry == host
-        }
-    }))
-}
-
-fn provider_is_allowed(provider: &str, allowed_providers: &[String]) -> bool {
-    allowed_providers.is_empty()
-        || allowed_providers
-            .iter()
-            .any(|entry| entry == "*" || entry == provider)
-}
-
 fn execute_chat_response_once(
     settings: &crate::backend::Settings,
     messages: &[Value],
@@ -494,7 +385,7 @@ fn execute_chat_response_once(
     tool_choice: Option<&Value>,
     cancelled: &AtomicBool,
 ) -> HttpRequestResult<Value> {
-    enforce_http_endpoint_policy(settings).map_err(HttpRequestError::Postllm)?;
+    crate::http_policy::enforce_settings(settings).map_err(HttpRequestError::Postllm)?;
 
     let Some(base_url) = settings.base_url.as_deref() else {
         return Err(HttpRequestError::Postllm(Error::invalid_setting(
@@ -560,7 +451,7 @@ fn execute_chat_stream_response_once(
     options: crate::backend::RequestOptions,
     cancelled: &AtomicBool,
 ) -> HttpRequestResult<Vec<Value>> {
-    enforce_http_endpoint_policy(settings).map_err(HttpRequestError::Postllm)?;
+    crate::http_policy::enforce_settings(settings).map_err(HttpRequestError::Postllm)?;
 
     let Some(base_url) = settings.base_url.as_deref() else {
         return Err(HttpRequestError::Postllm(Error::invalid_setting(
@@ -621,7 +512,7 @@ fn execute_rerank_response_once(
     top_n: Option<usize>,
     cancelled: &AtomicBool,
 ) -> HttpRequestResult<Vec<crate::backend::RerankResult>> {
-    enforce_http_endpoint_policy(settings).map_err(HttpRequestError::Postllm)?;
+    crate::http_policy::enforce_settings(settings).map_err(HttpRequestError::Postllm)?;
 
     let Some(base_url) = settings.base_url.as_deref() else {
         return Err(HttpRequestError::Postllm(Error::invalid_setting(
@@ -1044,8 +935,8 @@ fn parse_rerank_response(
 mod tests {
     use super::{
         build_request_payload, build_rerank_request_payload, build_stream_request_payload,
-        chat_response, chat_stream_response, enforce_http_endpoint_policy, extract_text,
-        parse_rerank_response, parse_sse_json_events, rerank_response,
+        chat_response, chat_stream_response, extract_text, parse_rerank_response,
+        parse_sse_json_events, rerank_response,
     };
     use crate::backend::{CandleDevice, RequestOptions, RerankResult, Runtime, Settings};
     use reqwest::StatusCode;
@@ -1373,44 +1264,6 @@ mod tests {
                 index: 0,
                 score: 0.88
             }]
-        );
-    }
-
-    #[test]
-    fn enforce_http_endpoint_policy_should_allow_matching_host_and_provider_rules() {
-        let mut settings = settings("https://api.openai.com/v1/chat/completions".to_owned());
-        settings.http_allowed_hosts = vec!["api.openai.com".to_owned()];
-        settings.http_allowed_providers = vec!["openai".to_owned()];
-
-        enforce_http_endpoint_policy(&settings).expect("policy should allow matching endpoint");
-    }
-
-    #[test]
-    fn enforce_http_endpoint_policy_should_reject_disallowed_hosts() {
-        let mut settings = settings("https://api.openai.com/v1/chat/completions".to_owned());
-        settings.http_allowed_hosts = vec!["host.docker.internal:11434".to_owned()];
-
-        let error = enforce_http_endpoint_policy(&settings).expect_err("host policy should reject");
-
-        assert!(
-            error
-                .to_string()
-                .contains("postllm.base_url host 'api.openai.com' is not permitted")
-        );
-    }
-
-    #[test]
-    fn enforce_http_endpoint_policy_should_reject_disallowed_providers() {
-        let mut settings = settings("https://api.openai.com/v1/chat/completions".to_owned());
-        settings.http_allowed_providers = vec!["ollama".to_owned()];
-
-        let error =
-            enforce_http_endpoint_policy(&settings).expect_err("provider policy should reject");
-
-        assert!(
-            error
-                .to_string()
-                .contains("provider 'openai' is not permitted")
         );
     }
 

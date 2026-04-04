@@ -6,6 +6,7 @@ pub(crate) mod catalog;
 pub(crate) mod client;
 pub(crate) mod error;
 pub(crate) mod guc;
+pub(crate) mod http_policy;
 pub(crate) mod interrupt;
 pub(crate) mod permissions;
 pub(crate) mod secrets;

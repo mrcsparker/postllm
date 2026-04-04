@@ -4,7 +4,6 @@
 )]
 
 use crate::error::{Error, Result};
-use reqwest::Url;
 use serde_json::{Map, Value, json};
 
 const POSTLLM_METADATA_KEY: &str = "_postllm";
@@ -787,7 +786,7 @@ fn normalize_response_metadata(mut response: Value, settings: &Settings) -> Valu
 fn normalize_stream_event(mut event: Value, settings: &Settings) -> Value {
     let metadata = json!({
         "runtime": settings.runtime.as_str(),
-        "provider": provider_identity(settings),
+        "provider": crate::http_policy::provider_identity(settings),
         "base_url": settings.base_url,
         "model": normalized_model(&event, settings),
         "content_delta": raw_stream_text_delta(&event),
@@ -805,7 +804,7 @@ fn normalize_stream_event(mut event: Value, settings: &Settings) -> Value {
 fn response_metadata(response: &Value, settings: &Settings) -> Value {
     json!({
         "runtime": settings.runtime.as_str(),
-        "provider": provider_identity(settings),
+        "provider": crate::http_policy::provider_identity(settings),
         "base_url": settings.base_url,
         "model": normalized_model(response, settings),
         "finish_reason": finish_reason(response),
@@ -817,31 +816,6 @@ fn postllm_metadata(response: &Value) -> Option<&Value> {
     response
         .get(POSTLLM_METADATA_KEY)
         .filter(|metadata| metadata.is_object())
-}
-
-pub(crate) fn provider_identity(settings: &Settings) -> String {
-    match settings.runtime {
-        Runtime::Candle => Runtime::CANDLE.to_owned(),
-        Runtime::OpenAi => infer_openai_provider(settings.base_url.as_deref()),
-    }
-}
-
-fn infer_openai_provider(base_url: Option<&str>) -> String {
-    let Some(base_url) = base_url else {
-        return "openai-compatible".to_owned();
-    };
-    let Ok(url) = Url::parse(base_url) else {
-        return "openai-compatible".to_owned();
-    };
-    let Some(host) = url.host_str() else {
-        return "openai-compatible".to_owned();
-    };
-
-    match (host, url.port_or_known_default()) {
-        ("api.openai.com", _) => "openai".to_owned(),
-        ("127.0.0.1" | "localhost" | "host.docker.internal", Some(11_434)) => "ollama".to_owned(),
-        _ => "openai-compatible".to_owned(),
-    }
 }
 
 fn normalized_model(response: &Value, settings: &Settings) -> String {
