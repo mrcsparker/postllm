@@ -242,24 +242,15 @@ fn is_valid_exact_host_entry(entry: &str) -> bool {
 )]
 mod tests {
     use super::{enforce_settings, parse_allowed_hosts, parse_allowed_providers, summarize};
-    use crate::backend::{CandleDevice, Runtime, Settings};
+    use crate::backend::test_support::SettingsBuilder;
+    use crate::backend::{Runtime, Settings};
 
     fn settings(base_url: Option<&str>) -> Settings {
-        Settings {
-            runtime: Runtime::OpenAi,
-            model: "llama3.2".to_owned(),
-            base_url: base_url.map(str::to_owned),
-            api_key: None,
-            timeout_ms: 30_000,
-            max_retries: 2,
-            retry_backoff_ms: 250,
-            http_allowed_hosts: Vec::new(),
-            http_allowed_providers: Vec::new(),
-            candle_cache_dir: None,
-            candle_offline: false,
-            candle_device: CandleDevice::Auto,
-            candle_max_input_tokens: 0,
-            candle_max_concurrency: 0,
+        let builder = SettingsBuilder::new().runtime(Runtime::OpenAi);
+
+        match base_url {
+            Some(base_url) => builder.base_url(base_url).build(),
+            None => builder.no_base_url().build(),
         }
     }
 

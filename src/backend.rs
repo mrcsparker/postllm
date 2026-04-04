@@ -125,6 +125,90 @@ pub(crate) struct Settings {
     pub(crate) candle_max_concurrency: u32,
 }
 
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::{CandleDevice, Runtime, Settings};
+
+    #[derive(Debug, Clone)]
+    pub(crate) struct SettingsBuilder {
+        settings: Settings,
+    }
+
+    impl Default for SettingsBuilder {
+        fn default() -> Self {
+            Self {
+                settings: Settings {
+                    runtime: Runtime::OpenAi,
+                    model: "llama3.2".to_owned(),
+                    base_url: Some("http://127.0.0.1:11434/v1/chat/completions".to_owned()),
+                    api_key: None,
+                    timeout_ms: 30_000,
+                    max_retries: 2,
+                    retry_backoff_ms: 250,
+                    http_allowed_hosts: Vec::new(),
+                    http_allowed_providers: Vec::new(),
+                    candle_cache_dir: None,
+                    candle_offline: false,
+                    candle_device: CandleDevice::Auto,
+                    candle_max_input_tokens: 0,
+                    candle_max_concurrency: 0,
+                },
+            }
+        }
+    }
+
+    impl SettingsBuilder {
+        pub(crate) fn new() -> Self {
+            Self::default()
+        }
+
+        pub(crate) fn runtime(mut self, runtime: Runtime) -> Self {
+            self.settings.runtime = runtime;
+            self
+        }
+
+        pub(crate) fn model(mut self, model: &str) -> Self {
+            self.settings.model = model.to_owned();
+            self
+        }
+
+        pub(crate) fn base_url(mut self, base_url: &str) -> Self {
+            self.settings.base_url = Some(base_url.to_owned());
+            self
+        }
+
+        pub(crate) fn no_base_url(mut self) -> Self {
+            self.settings.base_url = None;
+            self
+        }
+
+        pub(crate) fn api_key(mut self, api_key: Option<&str>) -> Self {
+            self.settings.api_key = api_key.map(str::to_owned);
+            self
+        }
+
+        pub(crate) fn retries(mut self, max_retries: u32, retry_backoff_ms: u64) -> Self {
+            self.settings.max_retries = max_retries;
+            self.settings.retry_backoff_ms = retry_backoff_ms;
+            self
+        }
+
+        pub(crate) fn allowed_hosts(mut self, allowed_hosts: Vec<String>) -> Self {
+            self.settings.http_allowed_hosts = allowed_hosts;
+            self
+        }
+
+        pub(crate) fn allowed_providers(mut self, allowed_providers: Vec<String>) -> Self {
+            self.settings.http_allowed_providers = allowed_providers;
+            self
+        }
+
+        pub(crate) fn build(self) -> Settings {
+            self.settings
+        }
+    }
+}
+
 /// Optional controls applied to a chat request.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct RequestOptions {
@@ -925,29 +1009,14 @@ fn content_text(content: &Value) -> Option<String> {
 )]
 mod tests {
     use super::{
-        CandleDevice, CapabilitySnapshot, Feature, RequestOptions, Runtime, Settings, choice,
-        finish_reason, normalize_response_metadata, normalize_stream_event, stream_text_delta,
-        usage,
+        CapabilitySnapshot, Feature, RequestOptions, Runtime, Settings, choice, finish_reason,
+        normalize_response_metadata, normalize_stream_event, stream_text_delta, usage,
     };
+    use crate::backend::test_support::SettingsBuilder;
     use serde_json::json;
 
     fn settings(runtime: Runtime) -> Settings {
-        Settings {
-            runtime,
-            model: "llama3.2".to_owned(),
-            base_url: Some("http://127.0.0.1:11434/v1/chat/completions".to_owned()),
-            api_key: None,
-            timeout_ms: 30_000,
-            max_retries: 2,
-            retry_backoff_ms: 250,
-            http_allowed_hosts: Vec::new(),
-            http_allowed_providers: Vec::new(),
-            candle_cache_dir: None,
-            candle_offline: false,
-            candle_device: CandleDevice::Auto,
-            candle_max_input_tokens: 0,
-            candle_max_concurrency: 0,
-        }
+        SettingsBuilder::new().runtime(runtime).build()
     }
 
     #[test]
@@ -1000,22 +1069,11 @@ mod tests {
     #[test]
     fn capability_snapshot_should_report_registered_candle_starter_models() {
         let snapshot = CapabilitySnapshot::from_settings(
-            &Settings {
-                runtime: Runtime::Candle,
-                model: "Qwen/Qwen2.5-0.5B-Instruct".to_owned(),
-                base_url: None,
-                api_key: None,
-                timeout_ms: 30_000,
-                max_retries: 2,
-                retry_backoff_ms: 250,
-                http_allowed_hosts: Vec::new(),
-                http_allowed_providers: Vec::new(),
-                candle_cache_dir: None,
-                candle_offline: false,
-                candle_device: CandleDevice::Auto,
-                candle_max_input_tokens: 0,
-                candle_max_concurrency: 0,
-            },
+            &SettingsBuilder::new()
+                .runtime(Runtime::Candle)
+                .model("Qwen/Qwen2.5-0.5B-Instruct")
+                .no_base_url()
+                .build(),
             Some("sentence-transformers/paraphrase-MiniLM-L3-v2"),
         )
         .snapshot();
@@ -1099,22 +1157,11 @@ mod tests {
                     "total_tokens": 16,
                 },
             }),
-            &Settings {
-                runtime: Runtime::Candle,
-                model: "Qwen/Qwen2.5-0.5B-Instruct".to_owned(),
-                base_url: None,
-                api_key: None,
-                timeout_ms: 30_000,
-                max_retries: 2,
-                retry_backoff_ms: 250,
-                http_allowed_hosts: Vec::new(),
-                http_allowed_providers: Vec::new(),
-                candle_cache_dir: None,
-                candle_offline: false,
-                candle_device: CandleDevice::Auto,
-                candle_max_input_tokens: 0,
-                candle_max_concurrency: 0,
-            },
+            &SettingsBuilder::new()
+                .runtime(Runtime::Candle)
+                .model("Qwen/Qwen2.5-0.5B-Instruct")
+                .no_base_url()
+                .build(),
         );
 
         assert_eq!(

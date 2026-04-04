@@ -5575,6 +5575,39 @@ mod tests {
         role_name
     }
 
+    fn sql_permission_set(
+        role_name: &str,
+        object_type: &str,
+        target: &str,
+        description: Option<&str>,
+    ) -> Value {
+        let description_sql = description.map(sql_literal).map_or_else(
+            || "NULL".to_owned(),
+            |value| format!("description => {value}"),
+        );
+
+        sql_json(&format!(
+            "SELECT postllm.permission_set(
+                role_name => {},
+                object_type => {},
+                target => {},
+                {}
+            )",
+            sql_literal(role_name),
+            sql_literal(object_type),
+            sql_literal(target),
+            description_sql,
+        ))
+    }
+
+    fn grant_permission(role_name: &str, object_type: &str, target: &str) {
+        drop(sql_permission_set(role_name, object_type, target, None));
+    }
+
+    fn set_local_role(role_name: &str) {
+        sql_run(&format!("SET LOCAL ROLE {role_name}"));
+    }
+
     fn start_mock_stream_server(response_body: &str) -> (String, mpsc::Receiver<Value>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
         let address = format!(
@@ -6015,15 +6048,12 @@ mod tests {
     #[pg_test]
     fn sql_permissions_should_store_and_delete_rows() {
         let role_name = create_test_role("permissions");
-        let stored = sql_json(&format!(
-            "SELECT postllm.permission_set(
-                role_name => {},
-                object_type => 'runtime',
-                target => 'openai',
-                description => 'Hosted runtime access'
-            )",
-            sql_literal(&role_name),
-        ));
+        let stored = sql_permission_set(
+            &role_name,
+            "runtime",
+            "openai",
+            Some("Hosted runtime access"),
+        );
         let fetched = sql_json(&format!(
             "SELECT postllm.permission(
                 role_name => {},
@@ -6055,16 +6085,9 @@ mod tests {
     #[pg_test]
     fn sql_configure_should_allow_permitted_runtime_for_outer_role() {
         let role_name = create_test_role("runtime_allowed");
-        drop(sql_json(&format!(
-            "SELECT postllm.permission_set(
-                role_name => {},
-                object_type => 'runtime',
-                target => 'openai'
-            )",
-            sql_literal(&role_name),
-        )));
+        grant_permission(&role_name, "runtime", "openai");
 
-        sql_run(&format!("SET LOCAL ROLE {role_name}"));
+        set_local_role(&role_name);
         let configured = sql_json("SELECT postllm.configure(runtime => 'openai')");
 
         assert_eq!(configured["runtime"], "openai");
@@ -6075,16 +6098,9 @@ mod tests {
     fn sql_configure_should_reject_disallowed_runtime_for_outer_role() {
         let allowed_role = create_test_role("runtime_policy");
         let caller_role = create_test_role("runtime_denied");
-        drop(sql_json(&format!(
-            "SELECT postllm.permission_set(
-                role_name => {},
-                object_type => 'runtime',
-                target => 'openai'
-            )",
-            sql_literal(&allowed_role),
-        )));
+        grant_permission(&allowed_role, "runtime", "openai");
 
-        sql_run(&format!("SET LOCAL ROLE {caller_role}"));
+        set_local_role(&caller_role);
         drop(Spi::get_one::<JsonB>(
             "SELECT postllm.configure(runtime => 'openai')",
         ));
@@ -6095,16 +6111,9 @@ mod tests {
     fn sql_complete_should_reject_disallowed_generation_model_for_outer_role() {
         let allowed_role = create_test_role("generation_policy");
         let caller_role = create_test_role("generation_denied");
-        drop(sql_json(&format!(
-            "SELECT postllm.permission_set(
-                role_name => {},
-                object_type => 'generation_model',
-                target => 'allowed-model'
-            )",
-            sql_literal(&allowed_role),
-        )));
+        grant_permission(&allowed_role, "generation_model", "allowed-model");
 
-        sql_run(&format!("SET LOCAL ROLE {caller_role}"));
+        set_local_role(&caller_role);
         drop(Spi::get_one::<String>(
             "SELECT postllm.complete(prompt => 'hello', model => 'blocked-model')",
         ));
@@ -6115,16 +6124,13 @@ mod tests {
     fn sql_embed_should_reject_disallowed_embedding_model_for_outer_role() {
         let allowed_role = create_test_role("embedding_policy");
         let caller_role = create_test_role("embedding_denied");
-        drop(sql_json(&format!(
-            "SELECT postllm.permission_set(
-                role_name => {},
-                object_type => 'embedding_model',
-                target => 'sentence-transformers/all-MiniLM-L6-v2'
-            )",
-            sql_literal(&allowed_role),
-        )));
+        grant_permission(
+            &allowed_role,
+            "embedding_model",
+            "sentence-transformers/all-MiniLM-L6-v2",
+        );
 
-        sql_run(&format!("SET LOCAL ROLE {caller_role}"));
+        set_local_role(&caller_role);
         drop(Spi::get_one::<Vec<f32>>(
             "SELECT postllm.embed('hello from SQL', model => 'blocked-embed')",
         ));
@@ -6135,16 +6141,9 @@ mod tests {
     fn sql_configure_should_reject_disallowed_privileged_setting_for_outer_role() {
         let allowed_role = create_test_role("setting_policy");
         let caller_role = create_test_role("setting_denied");
-        drop(sql_json(&format!(
-            "SELECT postllm.permission_set(
-                role_name => {},
-                object_type => 'setting',
-                target => 'base_url'
-            )",
-            sql_literal(&allowed_role),
-        )));
+        grant_permission(&allowed_role, "setting", "base_url");
 
-        sql_run(&format!("SET LOCAL ROLE {caller_role}"));
+        set_local_role(&caller_role);
         drop(Spi::get_one::<JsonB>(
             "SELECT postllm.configure(base_url => 'http://127.0.0.1:9999/v1/chat/completions')",
         ));
@@ -6155,16 +6154,9 @@ mod tests {
     fn sql_runtime_discover_should_reject_unauthorized_direct_base_url_setting() {
         let allowed_role = create_test_role("setting_direct_policy");
         let caller_role = create_test_role("setting_direct_denied");
-        drop(sql_json(&format!(
-            "SELECT postllm.permission_set(
-                role_name => {},
-                object_type => 'setting',
-                target => 'base_url'
-            )",
-            sql_literal(&allowed_role),
-        )));
+        grant_permission(&allowed_role, "setting", "base_url");
 
-        sql_run(&format!("SET LOCAL ROLE {caller_role}"));
+        set_local_role(&caller_role);
         sql_run("SET LOCAL postllm.base_url = 'http://127.0.0.1:9999/v1/chat/completions'");
         drop(Spi::get_one::<JsonB>("SELECT postllm.runtime_discover()"));
     }

@@ -3474,7 +3474,8 @@ mod tests {
         normalize_l2, probe_candle_device, rank_embeddings, render_chatml_prompt,
         resolve_runtime_device, sharded_weight_filenames, token_ids_from_value,
     };
-    use crate::backend::{CandleDevice, Feature, RequestOptions, Runtime, Settings};
+    use crate::backend::test_support::SettingsBuilder;
+    use crate::backend::{CandleDevice, Feature, RequestOptions, Runtime};
     use candle_core::{DType, Device};
     use hf_hub::{Cache, Repo};
     use serde_json::json;
@@ -4137,22 +4138,11 @@ mod tests {
     #[test]
     fn chat_response_should_reject_unknown_generation_models_before_runtime_work() {
         let error = chat_response(
-            &Settings {
-                runtime: Runtime::Candle,
-                model: "llama3.2".to_owned(),
-                base_url: None,
-                api_key: None,
-                timeout_ms: 30_000,
-                max_retries: 2,
-                retry_backoff_ms: 250,
-                http_allowed_hosts: Vec::new(),
-                http_allowed_providers: Vec::new(),
-                candle_cache_dir: None,
-                candle_offline: false,
-                candle_device: CandleDevice::Auto,
-                candle_max_input_tokens: 0,
-                candle_max_concurrency: 0,
-            },
+            &SettingsBuilder::new()
+                .runtime(Runtime::Candle)
+                .model("llama3.2")
+                .no_base_url()
+                .build(),
             &[json!({"role": "user", "content": "hello"})],
             RequestOptions {
                 temperature: 0.2,

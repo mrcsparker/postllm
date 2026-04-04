@@ -938,7 +938,8 @@ mod tests {
         chat_response, chat_stream_response, extract_text, parse_rerank_response,
         parse_sse_json_events, rerank_response,
     };
-    use crate::backend::{CandleDevice, RequestOptions, RerankResult, Runtime, Settings};
+    use crate::backend::test_support::SettingsBuilder;
+    use crate::backend::{RequestOptions, RerankResult, Runtime, Settings};
     use reqwest::StatusCode;
     use serde_json::{Value, json};
     use std::io::{BufRead, BufReader, Cursor, Read, Write};
@@ -968,22 +969,12 @@ mod tests {
         max_retries: u32,
         retry_backoff_ms: u64,
     ) -> Settings {
-        Settings {
-            runtime: Runtime::OpenAi,
-            model: "llama3.2".to_owned(),
-            base_url: Some(base_url),
-            api_key: Some("secret-token".to_owned()),
-            timeout_ms: 30_000,
-            max_retries,
-            retry_backoff_ms,
-            http_allowed_hosts: Vec::new(),
-            http_allowed_providers: Vec::new(),
-            candle_cache_dir: None,
-            candle_offline: false,
-            candle_device: CandleDevice::Auto,
-            candle_max_input_tokens: 0,
-            candle_max_concurrency: 0,
-        }
+        SettingsBuilder::new()
+            .runtime(Runtime::OpenAi)
+            .base_url(&base_url)
+            .api_key(Some("secret-token"))
+            .retries(max_retries, retry_backoff_ms)
+            .build()
     }
 
     fn request_options() -> RequestOptions {
