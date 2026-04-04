@@ -2,6 +2,11 @@
 
 This file is the execution plan for turning `postllm` into a serious PostgreSQL-native LLM extension.
 
+Current professional-quality rating (rough, no tests, subjective): **5/10**.
+
+This score is not a verdict on feature completeness; it is an assessment of code-readability, maintainability structure, and release confidence.
+The goal is to reach 8+ before public release.
+
 The ordering is intentional:
 
 - Lower-numbered issues should land before higher-numbered ones unless there is a clear dependency reason not to.
@@ -206,7 +211,18 @@ Issues:
 - [x] `PL-063` Reduce repetitive `Settings` construction and test fixture boilerplate across Rust unit tests and `pg_test` coverage with shared builders/helpers.
 - [x] `PL-064` Break up long SQL entrypoint and helper functions in `src/lib.rs` so each function does one thing and cross-cutting concerns are pushed into narrower modules.
 - [x] `PL-065` Standardize operator-policy code around one obvious pattern for secrets, permissions, network policy, quotas, and future governance controls.
-- [ ] `PL-066` Add a maintainability pass focused on naming, comments, module boundaries, and deletion of dead or redundant code introduced during feature expansion.
+- [ ] `PL-066` Add a concrete naming, comments, and dead-code cleanup pass using a fixed rubric for:
+  - public/internal API names
+  - module boundaries and single-responsibility ownership
+  - removal of dead utility functions
+  - readability of SQL entrypoint and policy modules
+- [ ] `PL-067` Split `src/lib.rs` into bounded API surface modules (`api_config`, `api_messages`, `api_inference`, `api_retrieval`, `api_ops`) and keep each function file small and intention-revealing.
+- [ ] `PL-068` Introduce a single `ExecutionContext` type for request lifecycle (`resolve -> validate -> enforce policy -> call runtime`) to remove duplicated logic in request entrypoints.
+- [ ] `PL-069` Extract shared SQL builder/lookup helpers from `guc`, `permissions`, `secrets`, and `catalog` into a common internal module to avoid duplicated SPI/error path patterns.
+- [x] `PL-070` Add a dedicated architecture map for request and permission flows to help future reviewers reason about control flow quickly.
+- [ ] `PL-071` Add a contributor-facing style guide for code ownership, naming, and complexity thresholds, and enforce it on new changes via review and CI.
+- [ ] `PL-072` Add static complexity guardrails (`cyclomatic` and `func_len` checks or clippy config where practical) for new and touched modules.
+- [ ] `PL-073` Add a "Professionalization QA" checklist task list and require passing it before each milestone merges.
 
 ## Recommended Ship Order
 
