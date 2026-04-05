@@ -2,9 +2,10 @@
 
 This file is the execution plan for turning `postllm` into a serious PostgreSQL-native LLM extension.
 
-Current professional-quality rating (rough, no tests, subjective): **5/10**.
+Current professional-quality rating (rough, no tests, subjective): **6/10**.
 
 This score is not a verdict on feature completeness; it is an assessment of code-readability, maintainability structure, and release confidence.
+The highest priority before public release is to complete the Release Gate items and raise this score to 8+.
 The goal is to reach 8+ before public release.
 
 The ordering is intentional:
@@ -216,13 +217,21 @@ Issues:
   - module boundaries and single-responsibility ownership
   - removal of dead utility functions
   - readability of SQL entrypoint and policy modules
-- [ ] `PL-067` Split `src/lib.rs` into bounded API surface modules (`api_config`, `api_messages`, `api_inference`, `api_retrieval`, `api_ops`) and keep each function file small and intention-revealing.
+- [x] `PL-067` Split `src/lib.rs` into bounded API surface modules (`api_config`, `api_messages`, `api_inference`, `api_retrieval`, `api_ops`) and keep each function file small and intention-revealing.
+- [x] `PL-077` Move SQL-facing API wrappers into `src/api/` (`config`, `messages`, `inference`, `retrieval`, `ops`) and remove `crate::api_*`-style call sites.
+- [ ] `PL-078` Consolidate repetitive enum parse/`Display` patterns (`Runtime`, `CandleDevice`, `ModelAliasLane`, `PermissionObjectType`, retrieval/scoping enums) into helper traits/macros or derive-based implementations to reduce duplicated matching and error text drift; target at least 300 lines deleted and clearer parser ownership.
 - [ ] `PL-068` Introduce a single `ExecutionContext` type for request lifecycle (`resolve -> validate -> enforce policy -> call runtime`) to remove duplicated logic in request entrypoints.
 - [ ] `PL-069` Extract shared SQL builder/lookup helpers from `guc`, `permissions`, `secrets`, and `catalog` into a common internal module to avoid duplicated SPI/error path patterns.
 - [x] `PL-070` Add a dedicated architecture map for request and permission flows to help future reviewers reason about control flow quickly.
 - [ ] `PL-071` Add a contributor-facing style guide for code ownership, naming, and complexity thresholds, and enforce it on new changes via review and CI.
 - [ ] `PL-072` Add static complexity guardrails (`cyclomatic` and `func_len` checks or clippy config where practical) for new and touched modules.
 - [ ] `PL-073` Add a "Professionalization QA" checklist task list and require passing it before each milestone merges.
+- [x] `PL-074` Add a release-blocking README and docs reorganization pass:
+  - one-page "quick path" by role (operator, integrator, contributor),
+  - decision-first documentation map with explicit where-to-start links,
+  - short "minimum reading" checklists for first production trial.
+- [x] `PL-075` Refactor `docs/README.md` into role-based reading tracks and cross-link every track to concrete checklists in `getting-started`, `configuration`, `runtime`, `examples`, and `architecture`.
+- [x] `PL-076` Add an "API module map" section in `docs/architecture.md` that explicitly maps each public SQL surface family to internal ownership (`api_config`, `api_messages`, `api_inference`, `api_retrieval`, `api_ops`, and policy/runtime internals).
 
 ## Recommended Ship Order
 

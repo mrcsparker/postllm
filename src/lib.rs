@@ -1,10 +1,12 @@
 #![doc = include_str!("../README.md")]
 
+pub(crate) mod api;
 pub(crate) mod backend;
 pub(crate) mod candle;
 pub(crate) mod catalog;
 pub(crate) mod client;
 pub(crate) mod error;
+pub(crate) mod enum_parser;
 pub(crate) mod guc;
 pub(crate) mod http_policy;
 pub(crate) mod interrupt;
@@ -101,35 +103,35 @@ pgrx::extension_sql!(
 
 #[pgrx::pg_schema]
 mod postllm {
+    use crate::api::{config, inference, messages, ops, retrieval};
     use pgrx::iter::TableIterator;
     use pgrx::{
         Aggregate, AggregateName, JsonB, ParallelOption, default, pg_aggregate, pg_extern,
         search_path,
     };
-    use serde_json::json;
 
     /// Returns the current backend-visible `postllm` settings.
     #[pg_extern]
     fn settings() -> JsonB {
-        JsonB(crate::guc::snapshot())
+        config::settings()
     }
 
     /// Returns the active runtime and feature capability snapshot.
     #[pg_extern]
     fn capabilities() -> JsonB {
-        JsonB(crate::guc::capabilities_snapshot())
+        config::capabilities()
     }
 
     /// Reports the active runtime discovery and readiness snapshot without raising probe failures.
     #[pg_extern]
     fn runtime_discover() -> JsonB {
-        JsonB(crate::runtime_discover_impl())
+        config::runtime_discover()
     }
 
     /// Returns whether the active runtime currently appears ready to serve requests.
     #[pg_extern]
     fn runtime_ready() -> bool {
-        crate::runtime_ready_impl()
+        config::runtime_ready()
     }
 
     /// Applies session-level configuration overrides and returns the resulting settings snapshot.
@@ -155,7 +157,7 @@ mod postllm {
         candle_max_input_tokens: default!(Option<i32>, "NULL"),
         candle_max_concurrency: default!(Option<i32>, "NULL"),
     ) -> JsonB {
-        crate::finish_json_result(crate::guc::configure_session(
+        config::configure(
             base_url,
             model,
             embedding_model,
@@ -170,19 +172,19 @@ mod postllm {
             candle_device,
             candle_max_input_tokens,
             candle_max_concurrency,
-        ))
+        )
     }
 
     /// Returns all named configuration profiles.
     #[pg_extern]
     fn profiles() -> JsonB {
-        crate::finish_json_result(crate::profiles_impl())
+        config::profiles()
     }
 
     /// Returns one named configuration profile.
     #[pg_extern]
     fn profile(name: &str) -> JsonB {
-        crate::finish_json_result(crate::profile_impl(name))
+        config::profile(name)
     }
 
     /// Stores or updates a named configuration profile.
@@ -208,7 +210,7 @@ mod postllm {
         candle_max_input_tokens: default!(Option<i32>, "NULL"),
         candle_max_concurrency: default!(Option<i32>, "NULL"),
     ) -> JsonB {
-        crate::finish_json_result(crate::profile_set_impl(
+        config::profile_set(
             name,
             description,
             base_url,
@@ -224,62 +226,62 @@ mod postllm {
             candle_device,
             candle_max_input_tokens,
             candle_max_concurrency,
-        ))
+        )
     }
 
     /// Applies a named configuration profile to the current session.
     #[pg_extern(security_definer)]
     #[search_path(postllm, pg_catalog)]
     fn profile_apply(name: &str) -> JsonB {
-        crate::finish_json_result(crate::profile_apply_impl(name))
+        config::profile_apply(name)
     }
 
     /// Deletes a named configuration profile.
     #[pg_extern]
     fn profile_delete(name: &str) -> JsonB {
-        crate::finish_json_result(crate::profile_delete_impl(name))
+        config::profile_delete(name)
     }
 
     /// Returns all stored provider secret metadata.
     #[pg_extern(security_definer)]
     #[search_path(postllm, pg_catalog)]
     fn secrets() -> JsonB {
-        crate::finish_json_result(crate::secrets_impl())
+        config::secrets()
     }
 
     /// Returns one stored provider secret metadata record.
     #[pg_extern(security_definer)]
     #[search_path(postllm, pg_catalog)]
     fn secret(name: &str) -> JsonB {
-        crate::finish_json_result(crate::secret_impl(name))
+        config::secret(name)
     }
 
     /// Stores or updates a named encrypted provider secret.
     #[pg_extern(security_definer)]
     #[search_path(postllm, pg_catalog)]
     fn secret_set(name: &str, value: &str, description: default!(Option<&str>, "NULL")) -> JsonB {
-        crate::finish_json_result(crate::secret_set_impl(name, value, description))
+        config::secret_set(name, value, description)
     }
 
     /// Deletes a stored provider secret.
     #[pg_extern(security_definer)]
     #[search_path(postllm, pg_catalog)]
     fn secret_delete(name: &str) -> JsonB {
-        crate::finish_json_result(crate::secret_delete_impl(name))
+        config::secret_delete(name)
     }
 
     /// Returns all configured postllm role permissions.
     #[pg_extern(security_definer)]
     #[search_path(postllm, pg_catalog)]
     fn permissions() -> JsonB {
-        crate::finish_json_result(crate::permissions_impl())
+        config::permissions()
     }
 
     /// Returns one configured postllm role permission.
     #[pg_extern(security_definer)]
     #[search_path(postllm, pg_catalog)]
     fn permission(role_name: &str, object_type: &str, target: &str) -> JsonB {
-        crate::finish_json_result(crate::permission_impl(role_name, object_type, target))
+        config::permission(role_name, object_type, target)
     }
 
     /// Stores or updates a postllm role permission.
@@ -291,35 +293,26 @@ mod postllm {
         target: &str,
         description: default!(Option<&str>, "NULL"),
     ) -> JsonB {
-        crate::finish_json_result(crate::permission_set_impl(
-            role_name,
-            object_type,
-            target,
-            description,
-        ))
+        config::permission_set(role_name, object_type, target, description)
     }
 
     /// Deletes a postllm role permission.
     #[pg_extern(security_definer)]
     #[search_path(postllm, pg_catalog)]
     fn permission_delete(role_name: &str, object_type: &str, target: &str) -> JsonB {
-        crate::finish_json_result(crate::permission_delete_impl(
-            role_name,
-            object_type,
-            target,
-        ))
+        config::permission_delete(role_name, object_type, target)
     }
 
     /// Returns all configured model aliases.
     #[pg_extern]
     fn model_aliases() -> JsonB {
-        crate::finish_json_result(crate::model_aliases_impl())
+        config::model_aliases()
     }
 
     /// Returns one configured model alias.
     #[pg_extern]
     fn model_alias(alias: &str, lane: &str) -> JsonB {
-        crate::finish_json_result(crate::model_alias_impl(alias, lane))
+        config::model_alias(alias, lane)
     }
 
     /// Stores or updates a lane-aware model alias.
@@ -330,37 +323,37 @@ mod postllm {
         model: &str,
         description: default!(Option<&str>, "NULL"),
     ) -> JsonB {
-        crate::finish_json_result(crate::model_alias_set_impl(alias, lane, model, description))
+        config::model_alias_set(alias, lane, model, description)
     }
 
     /// Deletes a lane-aware model alias.
     #[pg_extern]
     fn model_alias_delete(alias: &str, lane: &str) -> JsonB {
-        crate::finish_json_result(crate::model_alias_delete_impl(alias, lane))
+        config::model_alias_delete(alias, lane)
     }
 
     /// Builds a chat message object that can be used with [`chat`].
     #[pg_extern]
     fn message(role: &str, content: &str) -> JsonB {
-        crate::finish_json_result(crate::build_message(role, content))
+        messages::message(role, content)
     }
 
     /// Builds a `system` message object for [`chat`].
     #[pg_extern]
     fn system(content: &str) -> JsonB {
-        crate::finish_json_result(crate::build_message("system", content))
+        messages::system(content)
     }
 
     /// Builds a `user` message object for [`chat`].
     #[pg_extern]
     fn user(content: &str) -> JsonB {
-        crate::finish_json_result(crate::build_message("user", content))
+        messages::user(content)
     }
 
     /// Builds an `assistant` message object for [`chat`].
     #[pg_extern]
     fn assistant(content: &str) -> JsonB {
-        crate::finish_json_result(crate::build_message("assistant", content))
+        messages::assistant(content)
     }
 
     /// Renders a prompt template by substituting `{{name}}` placeholders from a JSON object.
@@ -370,10 +363,7 @@ mod postllm {
     )]
     #[pg_extern]
     fn render_template(template: &str, variables: default!(Option<JsonB>, "NULL")) -> String {
-        crate::finish_text_result(crate::render_template_impl(
-            template,
-            variables.as_ref().map(|variables| &variables.0),
-        ))
+        messages::render_template(template, variables)
     }
 
     /// Builds a chat message by first rendering a prompt template.
@@ -387,11 +377,7 @@ mod postllm {
         template: &str,
         variables: default!(Option<JsonB>, "NULL"),
     ) -> JsonB {
-        crate::finish_json_result(crate::build_message_template(
-            role,
-            template,
-            variables.as_ref().map(|variables| &variables.0),
-        ))
+        messages::message_template(role, template, variables)
     }
 
     /// Builds a `system` message by first rendering a prompt template.
@@ -401,11 +387,7 @@ mod postllm {
     )]
     #[pg_extern]
     fn system_template(template: &str, variables: default!(Option<JsonB>, "NULL")) -> JsonB {
-        crate::finish_json_result(crate::build_message_template(
-            "system",
-            template,
-            variables.as_ref().map(|variables| &variables.0),
-        ))
+        messages::system_template(template, variables)
     }
 
     /// Builds a `user` message by first rendering a prompt template.
@@ -415,11 +397,7 @@ mod postllm {
     )]
     #[pg_extern]
     fn user_template(template: &str, variables: default!(Option<JsonB>, "NULL")) -> JsonB {
-        crate::finish_json_result(crate::build_message_template(
-            "user",
-            template,
-            variables.as_ref().map(|variables| &variables.0),
-        ))
+        messages::user_template(template, variables)
     }
 
     /// Builds an `assistant` message by first rendering a prompt template.
@@ -429,23 +407,19 @@ mod postllm {
     )]
     #[pg_extern]
     fn assistant_template(template: &str, variables: default!(Option<JsonB>, "NULL")) -> JsonB {
-        crate::finish_json_result(crate::build_message_template(
-            "assistant",
-            template,
-            variables.as_ref().map(|variables| &variables.0),
-        ))
+        messages::assistant_template(template, variables)
     }
 
     /// Builds a text content part for multimodal chat messages.
     #[pg_extern]
     fn text_part(text: &str) -> JsonB {
-        crate::finish_json_result(crate::build_text_part(text))
+        messages::text_part(text)
     }
 
     /// Builds an image-url content part for multimodal chat messages.
     #[pg_extern]
     fn image_url_part(url: &str, detail: default!(Option<&str>, "NULL")) -> JsonB {
-        crate::finish_json_result(crate::build_image_url_part(url, detail))
+        messages::image_url_part(url, detail)
     }
 
     /// Builds a chat message whose content is an array of content parts.
@@ -455,7 +429,7 @@ mod postllm {
     )]
     #[pg_extern]
     fn message_parts(role: &str, parts: Vec<JsonB>) -> JsonB {
-        crate::finish_json_result(crate::build_parts_message(role, &parts))
+        messages::message_parts(role, parts)
     }
 
     /// Builds a `system` message whose content is an array of content parts.
@@ -465,7 +439,7 @@ mod postllm {
     )]
     #[pg_extern]
     fn system_parts(parts: Vec<JsonB>) -> JsonB {
-        crate::finish_json_result(crate::build_parts_message("system", &parts))
+        messages::system_parts(parts)
     }
 
     /// Builds a `user` message whose content is an array of content parts.
@@ -475,7 +449,7 @@ mod postllm {
     )]
     #[pg_extern]
     fn user_parts(parts: Vec<JsonB>) -> JsonB {
-        crate::finish_json_result(crate::build_parts_message("user", &parts))
+        messages::user_parts(parts)
     }
 
     /// Builds an `assistant` message whose content is an array of content parts.
@@ -485,7 +459,7 @@ mod postllm {
     )]
     #[pg_extern]
     fn assistant_parts(parts: Vec<JsonB>) -> JsonB {
-        crate::finish_json_result(crate::build_parts_message("assistant", &parts))
+        messages::assistant_parts(parts)
     }
 
     /// Builds a function-style tool call object.
@@ -495,7 +469,7 @@ mod postllm {
     )]
     #[pg_extern]
     fn tool_call(id: &str, name: &str, arguments: JsonB) -> JsonB {
-        crate::finish_json_result(crate::build_tool_call(id, name, &arguments.0))
+        messages::tool_call(id, name, arguments)
     }
 
     /// Builds an assistant message that carries tool calls.
@@ -508,13 +482,13 @@ mod postllm {
         tool_calls: Vec<JsonB>,
         content: default!(Option<&str>, "NULL"),
     ) -> JsonB {
-        crate::finish_json_result(crate::build_assistant_tool_calls(&tool_calls, content))
+        messages::assistant_tool_calls(tool_calls, content)
     }
 
     /// Builds a tool-result message linked to a prior tool call.
     #[pg_extern]
     fn tool_result(tool_call_id: &str, content: &str) -> JsonB {
-        crate::finish_json_result(crate::build_tool_result(tool_call_id, content))
+        messages::tool_result(tool_call_id, content)
     }
 
     /// Builds an OpenAI-compatible function-tool definition for future tool-calling requests.
@@ -528,31 +502,31 @@ mod postllm {
         parameters: JsonB,
         description: default!(Option<&str>, "NULL"),
     ) -> JsonB {
-        crate::finish_json_result(crate::build_function_tool(name, &parameters.0, description))
+        messages::function_tool(name, parameters, description)
     }
 
     /// Builds a `tool_choice` payload requesting automatic tool selection.
     #[pg_extern]
     fn tool_choice_auto() -> JsonB {
-        JsonB(crate::build_tool_choice_mode("auto"))
+        messages::tool_choice_auto()
     }
 
     /// Builds a `tool_choice` payload disabling tool selection.
     #[pg_extern]
     fn tool_choice_none() -> JsonB {
-        JsonB(crate::build_tool_choice_mode("none"))
+        messages::tool_choice_none()
     }
 
     /// Builds a `tool_choice` payload requiring the model to call a tool.
     #[pg_extern]
     fn tool_choice_required() -> JsonB {
-        JsonB(crate::build_tool_choice_mode("required"))
+        messages::tool_choice_required()
     }
 
     /// Builds a `tool_choice` payload forcing one named function tool.
     #[pg_extern]
     fn tool_choice_function(name: &str) -> JsonB {
-        crate::finish_json_result(crate::build_tool_choice_function(name))
+        messages::tool_choice_function(name)
     }
 
     /// Builds a JSON-schema response-format contract for structured generation.
@@ -562,9 +536,7 @@ mod postllm {
     )]
     #[pg_extern]
     fn json_schema(name: &str, schema: JsonB, strict: default!(bool, true)) -> JsonB {
-        crate::finish_json_result(crate::build_json_schema_response_format(
-            name, &schema.0, strict,
-        ))
+        messages::json_schema(name, schema, strict)
     }
 
     #[derive(AggregateName)]
@@ -635,7 +607,7 @@ mod postllm {
         temperature: default!(f64, 0.2),
         max_tokens: default!(Option<i32>, "NULL"),
     ) -> JsonB {
-        crate::finish_json_result(crate::chat_impl(&messages, model, temperature, max_tokens))
+        inference::chat(messages, model, temperature, max_tokens)
     }
 
     /// Sends a prepared conversation to the configured LLM and returns the first textual answer.
@@ -650,12 +622,7 @@ mod postllm {
         temperature: default!(f64, 0.2),
         max_tokens: default!(Option<i32>, "NULL"),
     ) -> String {
-        crate::finish_text_result(crate::chat_text_impl(
-            &messages,
-            model,
-            temperature,
-            max_tokens,
-        ))
+        inference::chat_text(messages, model, temperature, max_tokens)
     }
 
     /// Streams a prepared conversation and returns one row per provider chunk with a normalized text delta.
@@ -677,12 +644,7 @@ mod postllm {
             pgrx::name!(event, JsonB),
         ),
     > {
-        crate::finish_stream_rows_result(crate::chat_stream_impl(
-            &messages,
-            model,
-            temperature,
-            max_tokens,
-        ))
+        inference::chat_stream(messages, model, temperature, max_tokens)
     }
 
     /// Sends a prepared conversation to the configured LLM with a structured-output contract and returns parsed `jsonb`.
@@ -698,13 +660,7 @@ mod postllm {
         temperature: default!(f64, 0.2),
         max_tokens: default!(Option<i32>, "NULL"),
     ) -> JsonB {
-        crate::finish_json_result(crate::chat_structured_impl(
-            &messages,
-            &response_format.0,
-            model,
-            temperature,
-            max_tokens,
-        ))
+        inference::chat_structured(messages, response_format, model, temperature, max_tokens)
     }
 
     /// Sends a prepared conversation plus OpenAI-compatible tool definitions and returns the raw provider response.
@@ -721,14 +677,7 @@ mod postllm {
         temperature: default!(f64, 0.2),
         max_tokens: default!(Option<i32>, "NULL"),
     ) -> JsonB {
-        crate::finish_json_result(crate::chat_tools_impl(
-            &messages,
-            &tools,
-            tool_choice.as_ref().map(|tool_choice| &tool_choice.0),
-            model,
-            temperature,
-            max_tokens,
-        ))
+        inference::chat_tools(messages, tools, tool_choice, model, temperature, max_tokens)
     }
 
     /// Returns normalized token-usage metadata for a provider response.
@@ -738,7 +687,7 @@ mod postllm {
     )]
     #[pg_extern]
     fn usage(response: JsonB) -> JsonB {
-        JsonB(crate::usage_impl(&response.0))
+        inference::usage(response)
     }
 
     /// Returns a specific choice object from a provider response.
@@ -748,7 +697,7 @@ mod postllm {
     )]
     #[pg_extern]
     fn choice(response: JsonB, index: i32) -> JsonB {
-        crate::finish_json_result(crate::choice_impl(&response.0, index))
+        inference::choice(response, index)
     }
 
     /// Returns the normalized finish reason for a provider response when one is available.
@@ -758,7 +707,7 @@ mod postllm {
     )]
     #[pg_extern]
     fn finish_reason(response: JsonB) -> Option<String> {
-        crate::backend::finish_reason(&response.0)
+        inference::finish_reason(response)
     }
 
     /// Extracts the first textual completion from a provider response object.
@@ -768,7 +717,7 @@ mod postllm {
     )]
     #[pg_extern]
     fn extract_text(response: JsonB) -> String {
-        crate::finish_text_result(crate::client::extract_text(&response.0))
+        inference::extract_text(response)
     }
 
     /// Computes a local embedding using the Candle runtime and returns it as a `real[]`.
@@ -778,7 +727,7 @@ mod postllm {
         model: default!(Option<&str>, "NULL"),
         normalize: default!(bool, true),
     ) -> Vec<f32> {
-        crate::finish_vector_result(crate::embed_impl(input, model, normalize))
+        retrieval::embed(input, model, normalize)
     }
 
     /// Computes local embeddings for multiple inputs and returns them as JSON.
@@ -792,15 +741,13 @@ mod postllm {
         model: default!(Option<&str>, "NULL"),
         normalize: default!(bool, true),
     ) -> JsonB {
-        crate::finish_json_result(
-            crate::embed_many_impl(&inputs, model, normalize).map(|vectors| json!(vectors)),
-        )
+        retrieval::embed_many(inputs, model, normalize)
     }
 
     /// Returns metadata for the active or requested embedding model.
     #[pg_extern]
     fn embedding_model_info(model: default!(Option<&str>, "NULL")) -> JsonB {
-        crate::finish_json_result(crate::embedding_model_info_impl(model))
+        retrieval::embedding_model_info(model)
     }
 
     /// Installs local Candle model artifacts into the configured cache directory.
@@ -809,7 +756,7 @@ mod postllm {
         model: default!(Option<&str>, "NULL"),
         lane: default!(Option<&str>, "NULL"),
     ) -> JsonB {
-        crate::finish_json_result(crate::model_install_impl(model, lane))
+        ops::model_install(model, lane)
     }
 
     /// Loads a local Candle model into the current backend process so later calls avoid cold-start work.
@@ -818,7 +765,7 @@ mod postllm {
         model: default!(Option<&str>, "NULL"),
         lane: default!(Option<&str>, "NULL"),
     ) -> JsonB {
-        crate::finish_json_result(crate::model_prewarm_impl(model, lane))
+        ops::model_prewarm(model, lane)
     }
 
     /// Reports the on-disk and in-memory state of a local Candle model.
@@ -827,7 +774,7 @@ mod postllm {
         model: default!(Option<&str>, "NULL"),
         lane: default!(Option<&str>, "NULL"),
     ) -> JsonB {
-        crate::finish_json_result(crate::model_inspect_impl(model, lane))
+        ops::model_inspect(model, lane)
     }
 
     /// Evicts a local Candle model from backend memory, on-disk cache, or both.
@@ -837,7 +784,7 @@ mod postllm {
         lane: default!(Option<&str>, "NULL"),
         scope: default!(&str, "'all'"),
     ) -> JsonB {
-        crate::finish_json_result(crate::model_evict_impl(model, lane, scope))
+        ops::model_evict(model, lane, scope)
     }
 
     /// Chunks a document, computes embeddings, and returns canonical row data for embedding tables.
@@ -865,17 +812,15 @@ mod postllm {
             pgrx::name!(embedding, Vec<f32>),
         ),
     > {
-        crate::finish_embedding_document_rows_result(crate::embed_document_impl(
-            crate::DocumentEmbeddingRequest {
-                doc_id,
-                input,
-                metadata: metadata.as_ref().map(|metadata| &metadata.0),
-                chunk_chars,
-                overlap_chars,
-                model,
-                normalize,
-            },
-        ))
+        retrieval::embed_document(
+            doc_id,
+            input,
+            metadata,
+            chunk_chars,
+            overlap_chars,
+            model,
+            normalize,
+        )
     }
 
     /// Upserts canonical chunk rows into a caller-owned embedding table and optionally prunes stale chunks.
@@ -899,19 +844,17 @@ mod postllm {
         normalize: default!(bool, true),
         delete_missing: default!(bool, true),
     ) -> JsonB {
-        crate::finish_json_result(crate::ingest_document_impl(
+        retrieval::ingest_document(
             target_table,
-            crate::DocumentEmbeddingRequest {
-                doc_id,
-                input,
-                metadata: metadata.as_ref().map(|metadata| &metadata.0),
-                chunk_chars,
-                overlap_chars,
-                model,
-                normalize,
-            },
+            doc_id,
+            input,
+            metadata,
+            chunk_chars,
+            overlap_chars,
+            model,
+            normalize,
             delete_missing,
-        ))
+        )
     }
 
     /// Splits text into overlapping chunks using character-count targets with boundary-aware fallbacks.
@@ -921,7 +864,7 @@ mod postllm {
         chunk_chars: default!(i32, 1000),
         overlap_chars: default!(i32, 200),
     ) -> Vec<String> {
-        crate::finish_text_array_result(crate::chunk_text_impl(input, chunk_chars, overlap_chars))
+        retrieval::chunk_text(input, chunk_chars, overlap_chars)
     }
 
     /// Splits text into chunk rows and propagates caller metadata onto every emitted chunk.
@@ -943,12 +886,7 @@ mod postllm {
             pgrx::name!(metadata, JsonB),
         ),
     > {
-        crate::finish_chunk_rows_result(crate::chunk_document_impl(
-            input,
-            metadata.as_ref().map(|metadata| &metadata.0),
-            chunk_chars,
-            overlap_chars,
-        ))
+        retrieval::chunk_document(input, metadata, chunk_chars, overlap_chars)
     }
 
     /// Computes `PostgreSQL` full-text keyword ranks for candidate documents.
@@ -976,13 +914,7 @@ mod postllm {
             pgrx::name!(score, f64),
         ),
     > {
-        crate::finish_rank_rows_result(crate::keyword_rank_impl(
-            query,
-            &documents,
-            top_n,
-            text_search_config,
-            normalization,
-        ))
+        retrieval::keyword_rank(query, documents, top_n, text_search_config, normalization)
     }
 
     /// Computes a reciprocal-rank-fusion score from semantic and keyword ranks.
@@ -994,13 +926,13 @@ mod postllm {
         keyword_weight: default!(f64, 1.0),
         rrf_k: default!(i32, 60),
     ) -> f64 {
-        crate::finish_float_result(crate::rrf_score_impl(
+        retrieval::rrf_score(
             semantic_rank,
             keyword_rank,
             semantic_weight,
             keyword_weight,
             rrf_k,
-        ))
+        )
     }
 
     /// Fuses semantic reranking with `PostgreSQL` keyword search over the same candidate documents.
@@ -1040,9 +972,9 @@ mod postllm {
             pgrx::name!(keyword_score, Option<f64>),
         ),
     > {
-        crate::finish_hybrid_rank_rows_result(crate::hybrid_rank_impl(
+        retrieval::hybrid_rank(
             query,
-            &documents,
+            documents,
             top_n,
             model,
             text_search_config,
@@ -1050,7 +982,7 @@ mod postllm {
             keyword_weight,
             rrf_k,
             normalization,
-        ))
+        )
     }
 
     /// Reranks candidate documents for one query and returns ordered rows with the original document index.
@@ -1077,7 +1009,7 @@ mod postllm {
             pgrx::name!(score, f64),
         ),
     > {
-        crate::finish_rank_rows_result(crate::rerank_impl(query, &documents, top_n, model))
+        retrieval::rerank(query, documents, top_n, model)
     }
 
     /// Retrieves context documents, builds a prompt, and returns the answer plus retrieval metadata.
@@ -1106,9 +1038,9 @@ mod postllm {
         rrf_k: default!(i32, 60),
         normalization: default!(i32, 32),
     ) -> JsonB {
-        crate::finish_json_result(crate::rag_impl(
+        retrieval::rag(
             query,
-            &documents,
+            documents,
             system_prompt,
             model,
             retrieval,
@@ -1121,7 +1053,7 @@ mod postllm {
             keyword_weight,
             rrf_k,
             normalization,
-        ))
+        )
     }
 
     /// Retrieves context documents, builds a prompt, and returns only the answer text.
@@ -1150,9 +1082,9 @@ mod postllm {
         rrf_k: default!(i32, 60),
         normalization: default!(i32, 32),
     ) -> String {
-        crate::finish_text_result(crate::rag_text_impl(
+        retrieval::rag_text(
             query,
-            &documents,
+            documents,
             system_prompt,
             model,
             retrieval,
@@ -1165,7 +1097,7 @@ mod postllm {
             keyword_weight,
             rrf_k,
             normalization,
-        ))
+        )
     }
 
     /// Sends a single prompt, optionally preceded by a system prompt, and returns the text result.
@@ -1177,13 +1109,7 @@ mod postllm {
         temperature: default!(f64, 0.2),
         max_tokens: default!(Option<i32>, "NULL"),
     ) -> String {
-        crate::finish_text_result(crate::complete_impl(
-            prompt,
-            system_prompt,
-            model,
-            temperature,
-            max_tokens,
-        ))
+        inference::complete(prompt, system_prompt, model, temperature, max_tokens)
     }
 
     /// Sends a single prompt with a structured-output contract and returns parsed `jsonb`.
@@ -1200,14 +1126,14 @@ mod postllm {
         temperature: default!(f64, 0.2),
         max_tokens: default!(Option<i32>, "NULL"),
     ) -> JsonB {
-        crate::finish_json_result(crate::complete_structured_impl(
+        inference::complete_structured(
             prompt,
-            &response_format.0,
+            response_format,
             system_prompt,
             model,
             temperature,
             max_tokens,
-        ))
+        )
     }
 
     /// Streams a prompt and returns one row per provider chunk with a normalized text delta.
@@ -1226,13 +1152,7 @@ mod postllm {
             pgrx::name!(event, JsonB),
         ),
     > {
-        crate::finish_stream_rows_result(crate::complete_stream_impl(
-            prompt,
-            system_prompt,
-            model,
-            temperature,
-            max_tokens,
-        ))
+        inference::complete_stream(prompt, system_prompt, model, temperature, max_tokens)
     }
 
     /// Sends a prompt plus OpenAI-compatible tool definitions and returns the raw provider response.
@@ -1250,15 +1170,15 @@ mod postllm {
         temperature: default!(f64, 0.2),
         max_tokens: default!(Option<i32>, "NULL"),
     ) -> JsonB {
-        crate::finish_json_result(crate::complete_tools_impl(
+        inference::complete_tools(
             prompt,
-            &tools,
+            tools,
             system_prompt,
-            tool_choice.as_ref().map(|tool_choice| &tool_choice.0),
+            tool_choice,
             model,
             temperature,
             max_tokens,
-        ))
+        )
     }
 
     /// Sends multiple prompts, optionally preceded by the same system prompt, and returns the text results in input order.
@@ -1274,13 +1194,7 @@ mod postllm {
         temperature: default!(f64, 0.2),
         max_tokens: default!(Option<i32>, "NULL"),
     ) -> Vec<String> {
-        crate::finish_text_array_result(crate::complete_many_impl(
-            &prompts,
-            system_prompt,
-            model,
-            temperature,
-            max_tokens,
-        ))
+        inference::complete_many(prompts, system_prompt, model, temperature, max_tokens)
     }
 
     /// Sends multiple prompts and returns one row per completion for set-oriented SQL workflows.
@@ -1303,13 +1217,7 @@ mod postllm {
             pgrx::name!(completion, String),
         ),
     > {
-        crate::finish_completion_rows_result(crate::complete_many_rows_impl(
-            &prompts,
-            system_prompt,
-            model,
-            temperature,
-            max_tokens,
-        ))
+        inference::complete_many_rows(prompts, system_prompt, model, temperature, max_tokens)
     }
 }
 
@@ -1363,12 +1271,32 @@ enum RagRetrievalStrategy {
 }
 
 impl RagRetrievalStrategy {
+    const VARIANTS: [(&'static str, Self); 3] = [
+        ("hybrid", Self::Hybrid),
+        ("semantic", Self::Semantic),
+        ("keyword", Self::Keyword),
+    ];
+
     const fn as_str(self) -> &'static str {
         match self {
             Self::Hybrid => "hybrid",
             Self::Semantic => "semantic",
             Self::Keyword => "keyword",
         }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        let normalized = enum_parser::normalize_input(value);
+        enum_parser::parse_case_insensitive(normalized.as_str(), &Self::VARIANTS).map_err(
+            |_| {
+                let accepted = enum_parser::format_variant_values(&Self::VARIANTS);
+                Error::invalid_argument(
+                    "retrieval",
+                    format!("must be one of {accepted}, got '{normalized}'"),
+                    format!("pass retrieval => {accepted}"),
+                )
+            },
+        )
     }
 }
 
@@ -1427,6 +1355,38 @@ enum LocalModelLaneSelector {
     Auto,
     Embedding,
     Generation,
+}
+
+impl LocalModelLaneSelector {
+    const EMBEDDING: &'static str = "embedding";
+    const GENERATION: &'static str = "generation";
+    const VARIANTS: [(&'static str, Self); 3] = [
+        ("auto", Self::Auto),
+        (Self::EMBEDDING, Self::Embedding),
+        (Self::GENERATION, Self::Generation),
+    ];
+    const EXPLICIT_VARIANTS: &'static str = "'embedding' or 'generation'";
+
+    fn parse(value: &str) -> Result<Self> {
+        let normalized = require_non_blank("lane", value)?;
+        enum_parser::parse_case_insensitive(normalized, &Self::VARIANTS).map_err(|unknown| {
+            Error::invalid_argument(
+                "lane",
+                format!(
+                    "must be one of {}, got '{unknown}'",
+                    enum_parser::format_variant_values(&Self::VARIANTS)
+                ),
+                format!("omit lane for auto selection or pass lane => {}", Self::EXPLICIT_VARIANTS),
+            )
+        })
+    }
+
+    fn parse_or_default(value: Option<&str>) -> Result<Self> {
+        match value {
+            None => Ok(Self::Auto),
+            Some(value) => Self::parse(value),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2388,38 +2348,11 @@ fn auto_local_model_lane_for_model(model: &str) -> candle::LocalModelLane {
 }
 
 fn parse_local_model_lane_selector(lane: Option<&str>) -> Result<LocalModelLaneSelector> {
-    match lane {
-        None => Ok(LocalModelLaneSelector::Auto),
-        Some(lane) => match require_non_blank("lane", lane)?
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "auto" => Ok(LocalModelLaneSelector::Auto),
-            "embedding" => Ok(LocalModelLaneSelector::Embedding),
-            "generation" => Ok(LocalModelLaneSelector::Generation),
-            unknown => Err(Error::invalid_argument(
-                "lane",
-                format!("must be one of 'auto', 'embedding', or 'generation', got '{unknown}'"),
-                "omit lane for auto selection or pass lane => 'embedding' or 'generation'",
-            )),
-        },
-    }
+    LocalModelLaneSelector::parse_or_default(lane)
 }
 
 fn parse_local_model_evict_scope(scope: &str) -> Result<candle::LocalModelEvictionScope> {
-    match require_non_blank("scope", scope)?
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "memory" => Ok(candle::LocalModelEvictionScope::Memory),
-        "disk" => Ok(candle::LocalModelEvictionScope::Disk),
-        "all" => Ok(candle::LocalModelEvictionScope::All),
-        unknown => Err(Error::invalid_argument(
-            "scope",
-            format!("must be one of 'memory', 'disk', or 'all', got '{unknown}'"),
-            "pass scope => 'memory', 'disk', or 'all'",
-        )),
-    }
+    candle::LocalModelEvictionScope::parse(scope)
 }
 
 fn embed_document_impl(
@@ -3339,16 +3272,7 @@ fn validate_rag_retrieval(retrieval: Option<&str>) -> Result<RagRetrievalStrateg
         None => RagRetrievalStrategy::Hybrid.as_str(),
     };
 
-    match retrieval.to_ascii_lowercase().as_str() {
-        "hybrid" => Ok(RagRetrievalStrategy::Hybrid),
-        "semantic" => Ok(RagRetrievalStrategy::Semantic),
-        "keyword" => Ok(RagRetrievalStrategy::Keyword),
-        _ => Err(Error::invalid_argument(
-            "retrieval",
-            format!("must be one of 'hybrid', 'semantic', or 'keyword', got '{retrieval}'"),
-            "pass retrieval => 'hybrid', 'semantic', or 'keyword'",
-        )),
-    }
+    RagRetrievalStrategy::parse(retrieval)
 }
 
 fn resolve_text_search_config(text_search_config: Option<&str>) -> Result<String> {
@@ -5259,6 +5183,17 @@ mod helper_tests {
     }
 
     #[test]
+    fn parse_local_model_lane_selector_should_reject_unknown_values() {
+        let error = parse_local_model_lane_selector(Some("vision"))
+            .expect_err("unknown lane values should be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "postllm received an invalid argument: argument 'lane' must be one of 'auto', 'embedding', or 'generation', got 'vision'; fix: omit lane for auto selection or pass lane => 'embedding' or 'generation'"
+        );
+    }
+
+    #[test]
     fn parse_local_model_evict_scope_should_accept_supported_values() {
         assert_eq!(
             parse_local_model_evict_scope("memory").expect("memory scope should parse"),
@@ -5271,6 +5206,17 @@ mod helper_tests {
         assert_eq!(
             parse_local_model_evict_scope("all").expect("all scope should parse"),
             LocalModelEvictionScope::All
+        );
+    }
+
+    #[test]
+    fn parse_local_model_evict_scope_should_reject_unknown_values() {
+        let error = parse_local_model_evict_scope("network")
+            .expect_err("unknown scope values should be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "postllm received an invalid argument: argument 'scope' must be one of 'memory', 'disk', or 'all', got 'network'; fix: pass scope => 'memory', 'disk', or 'all'"
         );
     }
 
@@ -6044,7 +5990,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn sql_configure_should_allow_hosted_endpoints_on_matching_host_allowlist() {
+    fn sql_configure_allow_hosted_endpoints_with_matching_allowlist() {
         sql_run("SET LOCAL postllm.http_allowed_hosts = '*.openai.com'");
 
         let configured = sql_json(
@@ -6064,7 +6010,7 @@ mod tests {
     #[should_panic(
         expected = "postllm.base_url host 'api.openai.com' is not permitted by postllm.http_allowed_hosts"
     )]
-    fn sql_configure_should_reject_hosted_endpoints_outside_host_allowlist() {
+    fn sql_configure_reject_hosted_endpoints_outside_allowlist() {
         sql_run("SET LOCAL postllm.http_allowed_hosts = 'host.docker.internal:11434'");
 
         drop(Spi::get_one::<JsonB>(
@@ -6076,7 +6022,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn sql_runtime_discover_should_report_disallowed_hosted_provider_safelist() {
+    fn sql_runtime_discover_report_disallowed_hosted_provider_safelist() {
         sql_run("SET LOCAL postllm.http_allowed_providers = 'ollama'");
         sql_run("SET LOCAL postllm.base_url = 'https://api.openai.com/v1/chat/completions'");
         sql_run("SET LOCAL postllm.runtime = 'openai'");
@@ -6162,7 +6108,7 @@ mod tests {
 
     #[pg_test]
     #[should_panic(expected = "generation model 'blocked-model' is not permitted")]
-    fn sql_complete_should_reject_disallowed_generation_model_for_outer_role() {
+    fn sql_complete_reject_disallowed_generation_model_outer_role() {
         let allowed_role = create_test_role("generation_policy");
         let caller_role = create_test_role("generation_denied");
         grant_permission(&allowed_role, "generation_model", "allowed-model");
@@ -6175,7 +6121,7 @@ mod tests {
 
     #[pg_test]
     #[should_panic(expected = "embedding model 'blocked-embed' is not permitted")]
-    fn sql_embed_should_reject_disallowed_embedding_model_for_outer_role() {
+    fn sql_embed_reject_disallowed_embedding_model_outer_role() {
         let allowed_role = create_test_role("embedding_policy");
         let caller_role = create_test_role("embedding_denied");
         grant_permission(
@@ -6192,7 +6138,7 @@ mod tests {
 
     #[pg_test]
     #[should_panic(expected = "privileged setting 'base_url' is not permitted")]
-    fn sql_configure_should_reject_disallowed_privileged_setting_for_outer_role() {
+    fn sql_configure_reject_disallowed_privileged_setting_outer_role() {
         let allowed_role = create_test_role("setting_policy");
         let caller_role = create_test_role("setting_denied");
         grant_permission(&allowed_role, "setting", "base_url");
@@ -6205,7 +6151,7 @@ mod tests {
 
     #[pg_test]
     #[should_panic(expected = "privileged setting 'base_url' is not permitted")]
-    fn sql_runtime_discover_should_reject_unauthorized_direct_base_url_setting() {
+    fn sql_rt_discover_reject_unauthorized_base_url() {
         let allowed_role = create_test_role("setting_direct_policy");
         let caller_role = create_test_role("setting_direct_denied");
         grant_permission(&allowed_role, "setting", "base_url");

@@ -4,6 +4,7 @@
 )]
 
 use crate::error::{Error, Result};
+use crate::enum_parser;
 use crate::guc::SessionOverrides;
 use crate::secrets::StoredSecret;
 use pgrx::JsonB;
@@ -23,6 +24,10 @@ pub(crate) enum ModelAliasLane {
 impl ModelAliasLane {
     pub(crate) const GENERATION: &'static str = "generation";
     pub(crate) const EMBEDDING: &'static str = "embedding";
+    const VARIANTS: [(&'static str, Self); 2] = [
+        (Self::GENERATION, Self::Generation),
+        (Self::EMBEDDING, Self::Embedding),
+    ];
 
     #[must_use]
     pub(crate) const fn as_str(self) -> &'static str {
@@ -33,26 +38,16 @@ impl ModelAliasLane {
     }
 
     pub(crate) fn parse(argument: &str, value: &str) -> Result<Self> {
-        match require_non_blank(argument, value)?
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            Self::GENERATION => Ok(Self::Generation),
-            Self::EMBEDDING => Ok(Self::Embedding),
-            unknown => Err(Error::invalid_argument(
-                argument,
-                format!(
-                    "must be one of '{}' or '{}', got '{unknown}'",
-                    Self::GENERATION,
-                    Self::EMBEDDING
-                ),
-                format!(
-                    "pass {argument} => '{}' or '{}'",
-                    Self::GENERATION,
-                    Self::EMBEDDING
-                ),
-            )),
-        }
+        let normalized = require_non_blank(argument, value)?;
+        enum_parser::parse_case_insensitive(normalized, &Self::VARIANTS)
+            .map_err(|unknown| {
+                let accepted = enum_parser::format_variant_values(&Self::VARIANTS);
+                Error::invalid_argument(
+                    argument,
+                    format!("must be one of {accepted}, got '{unknown}'"),
+                    format!("pass {argument} => {accepted}"),
+                )
+            })
     }
 }
 
@@ -590,4 +585,32 @@ fn trimmed_or_none(value: &str) -> Option<&str> {
 
 fn trimmed_or_none_option(value: Option<&str>) -> Option<String> {
     value.and_then(trimmed_or_none).map(str::to_owned)
+}
+
+#[cfg(test)]
+mod test {
+    use super::ModelAliasLane;
+
+    #[test]
+    fn parse_model_alias_lane_should_accept_supported_values() {
+        assert_eq!(
+            ModelAliasLane::parse("lane", "generation").expect("generation lane should parse"),
+            ModelAliasLane::Generation
+        );
+        assert_eq!(
+            ModelAliasLane::parse("lane", "Embedding").expect("embedding lane should parse"),
+            ModelAliasLane::Embedding
+        );
+    }
+
+    #[test]
+    fn parse_model_alias_lane_should_reject_unknown_values() {
+        let error = ModelAliasLane::parse("lane", "vision")
+            .expect_err("unknown lane values should be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "postllm received an invalid argument: argument 'lane' must be one of 'generation' or 'embedding', got 'vision'; fix: pass lane => 'generation' or 'embedding'"
+        );
+    }
 }

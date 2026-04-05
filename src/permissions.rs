@@ -5,6 +5,7 @@
 
 use crate::backend::Runtime;
 use crate::error::{Error, Result};
+use crate::enum_parser;
 use crate::operator_policy;
 use pgrx::JsonB;
 use pgrx::datum::DatumWithOid;
@@ -42,6 +43,12 @@ impl PermissionObjectType {
     pub(crate) const SETTING: &'static str = "setting";
     pub(crate) const ACCEPTED_VALUES: &'static str =
         "'runtime', 'generation_model', 'embedding_model', or 'setting'";
+    const VARIANTS: [(&'static str, Self); 4] = [
+        (Self::RUNTIME, Self::Runtime),
+        (Self::GENERATION_MODEL, Self::GenerationModel),
+        (Self::EMBEDDING_MODEL, Self::EmbeddingModel),
+        (Self::SETTING, Self::Setting),
+    ];
 
     #[must_use]
     pub(crate) const fn as_str(self) -> &'static str {
@@ -54,21 +61,15 @@ impl PermissionObjectType {
     }
 
     pub(crate) fn parse(argument: &str, value: &str) -> Result<Self> {
-        match require_non_blank(argument, value)?
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            Self::RUNTIME => Ok(Self::Runtime),
-            Self::GENERATION_MODEL => Ok(Self::GenerationModel),
-            Self::EMBEDDING_MODEL => Ok(Self::EmbeddingModel),
-            Self::SETTING => Ok(Self::Setting),
-            unknown => Err(Error::invalid_argument(
+        let normalized = require_non_blank(argument, value)?;
+        enum_parser::parse_case_insensitive(normalized, &Self::VARIANTS).map_err(|unknown| {
+            let accepted = enum_parser::format_variant_values(&Self::VARIANTS);
+            Error::invalid_argument(
                 argument,
-                format!("must be one of {}, got '{unknown}'", Self::ACCEPTED_VALUES),
-                format!("pass {argument} => {}", Self::ACCEPTED_VALUES),
-            )),
-        }
+                format!("must be one of {accepted}, got '{unknown}'"),
+                format!("pass {argument} => {accepted}"),
+            )
+        })
     }
 }
 
@@ -240,11 +241,6 @@ pub(crate) fn ensure_setting_change_allowed(setting_name: &str) -> Result<()> {
         &target,
         &format!("privileged setting '{target}'"),
     )
-}
-
-#[must_use]
-pub(crate) fn caller_is_superuser() -> bool {
-    operator_policy::caller_is_superuser()
 }
 
 pub(crate) fn caller_role_name() -> String {
@@ -446,4 +442,38 @@ fn denied_fix_suffix(object_type: PermissionObjectType) -> &'static str {
 
 fn caller_role_oid() -> pg_sys::Oid {
     operator_policy::caller_role_oid()
+}
+
+#[cfg(test)]
+mod test {
+    use super::PermissionObjectType;
+
+    #[test]
+    fn parse_permission_object_type_should_accept_supported_values() {
+        assert_eq!(
+            PermissionObjectType::parse("object_type", "runtime")
+                .expect("runtime should parse"),
+            PermissionObjectType::Runtime
+        );
+        assert_eq!(
+            PermissionObjectType::parse("object_type", "generation_model")
+                .expect("generation_model should parse"),
+            PermissionObjectType::GenerationModel
+        );
+        assert_eq!(
+            PermissionObjectType::parse("object_type", "setting").expect("setting should parse"),
+            PermissionObjectType::Setting
+        );
+    }
+
+    #[test]
+    fn parse_permission_object_type_should_reject_unknown_values() {
+        let error = PermissionObjectType::parse("object_type", "bucket")
+            .expect_err("unknown object types should be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "postllm received an invalid argument: argument 'object_type' must be one of 'runtime', 'generation_model', 'embedding_model', or 'setting', got 'bucket'; fix: pass object_type => 'runtime', 'generation_model', 'embedding_model', or 'setting'"
+        );
+    }
 }

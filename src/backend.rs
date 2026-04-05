@@ -4,6 +4,7 @@
 )]
 
 use crate::error::{Error, Result};
+use crate::enum_parser;
 use serde_json::{Map, Value, json};
 
 const POSTLLM_METADATA_KEY: &str = "_postllm";
@@ -20,6 +21,10 @@ pub(crate) enum Runtime {
 impl Runtime {
     pub(crate) const OPENAI: &'static str = "openai";
     pub(crate) const CANDLE: &'static str = "candle";
+    const VARIANTS: [(&'static str, Self); 2] = [
+        (Self::OPENAI, Self::OpenAi),
+        (Self::CANDLE, Self::Candle),
+    ];
 
     /// Returns the canonical configuration string for this runtime.
     #[must_use]
@@ -32,19 +37,7 @@ impl Runtime {
 
     /// Parses a user-supplied runtime string.
     pub(crate) fn parse(value: &str) -> Result<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            Self::OPENAI => Ok(Self::OpenAi),
-            Self::CANDLE => Ok(Self::Candle),
-            unknown => Err(Error::invalid_argument(
-                "runtime",
-                format!(
-                    "must be '{}' or '{}', got '{unknown}'",
-                    Self::OPENAI,
-                    Self::CANDLE,
-                ),
-                "set runtime to 'openai' or 'candle'",
-            )),
-        }
+        enum_parser::parse_case_insensitive_with_default_error("runtime", value, &Self::VARIANTS)
     }
 }
 
@@ -67,6 +60,12 @@ impl CandleDevice {
     pub(crate) const CUDA: &'static str = "cuda";
     pub(crate) const METAL: &'static str = "metal";
     pub(crate) const ACCEPTED_VALUES: &'static str = "'auto', 'cpu', 'cuda', or 'metal'";
+    const VARIANTS: [(&'static str, Self); 4] = [
+        (Self::AUTO, Self::Auto),
+        (Self::CPU, Self::Cpu),
+        (Self::CUDA, Self::Cuda),
+        (Self::METAL, Self::Metal),
+    ];
 
     /// Returns the canonical configuration string for this device preference.
     #[must_use]
@@ -82,13 +81,7 @@ impl CandleDevice {
     /// Parses a user-supplied Candle device preference.
     #[must_use]
     pub(crate) fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            Self::AUTO => Some(Self::Auto),
-            Self::CPU => Some(Self::Cpu),
-            Self::CUDA => Some(Self::Cuda),
-            Self::METAL => Some(Self::Metal),
-            _ => None,
-        }
+        enum_parser::parse_case_insensitive(value, &Self::VARIANTS).ok()
     }
 }
 
@@ -190,16 +183,6 @@ pub(crate) mod test_support {
         pub(crate) fn retries(mut self, max_retries: u32, retry_backoff_ms: u64) -> Self {
             self.settings.max_retries = max_retries;
             self.settings.retry_backoff_ms = retry_backoff_ms;
-            self
-        }
-
-        pub(crate) fn allowed_hosts(mut self, allowed_hosts: Vec<String>) -> Self {
-            self.settings.http_allowed_hosts = allowed_hosts;
-            self
-        }
-
-        pub(crate) fn allowed_providers(mut self, allowed_providers: Vec<String>) -> Self {
-            self.settings.http_allowed_providers = allowed_providers;
             self
         }
 
@@ -1009,7 +992,8 @@ fn content_text(content: &Value) -> Option<String> {
 )]
 mod tests {
     use super::{
-        CapabilitySnapshot, Feature, RequestOptions, Runtime, Settings, choice, finish_reason,
+        CapabilitySnapshot, CandleDevice, Feature, RequestOptions, Runtime, Settings, choice,
+        finish_reason,
         normalize_response_metadata, normalize_stream_event, stream_text_delta, usage,
     };
     use crate::backend::test_support::SettingsBuilder;
@@ -1357,5 +1341,31 @@ mod tests {
 
         assert!((copied.temperature - 0.2).abs() < f64::EPSILON);
         assert_eq!(copied.max_tokens, Some(32));
+    }
+
+    #[test]
+    fn runtime_parse_should_accept_supported_values() {
+        assert_eq!(Runtime::parse("openai").expect("openai should parse"), Runtime::OpenAi);
+        assert_eq!(Runtime::parse("OpenAI").expect("case-insensitive parsing should work"), Runtime::OpenAi);
+        assert_eq!(Runtime::parse("CANDLE").expect("case-insensitive parsing should work"), Runtime::Candle);
+    }
+
+    #[test]
+    fn runtime_parse_should_reject_unknown_values() {
+        let error = Runtime::parse("invalid")
+            .expect_err("unknown runtime values should be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "postllm received an invalid argument: argument 'runtime' must be one of 'openai' or 'candle', got 'invalid'; fix: pass runtime => 'openai' or 'candle'"
+        );
+    }
+
+    #[test]
+    fn candle_device_parse_should_accept_supported_values() {
+        assert_eq!(CandleDevice::parse("cpu"), Some(CandleDevice::Cpu));
+        assert_eq!(CandleDevice::parse(" Cpu "), Some(CandleDevice::Cpu));
+        assert_eq!(CandleDevice::parse("TeSp"), None);
+        assert_eq!(CandleDevice::parse("cuda"), Some(CandleDevice::Cuda));
     }
 }

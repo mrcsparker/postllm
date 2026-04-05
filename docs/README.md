@@ -1,31 +1,38 @@
 # Documentation Index
 
-Use this page as the first stop to find the right page for your role.
+This page gives the quickest route to what you need.
 
-## Quick-start
+## Roles
 
-- [getting-started.md](./getting-started.md) — Install, run `cargo pgrx`, and make your first call.
-- [runtime.md](./runtime.md) — Understand how `openai` and `candle` runtime lanes differ.
+- [getting-started.md](./getting-started.md) — Install and run first SQL example.
+- [runtime.md](./runtime.md) — Runtime and capability differences.
+- [configuration.md](./configuration.md) — GUCs, `configure(...)`, profiles, secrets, permissions, allowlists, model aliases.
+- [examples.md](./examples.md) — Copy-paste SQL flows for common use cases.
+- [operations.md](./operations.md) — Docker, local dev workflows, and smoke tests.
+- [architecture.md](./architecture.md) — Internal request flow and ownership map.
 
-## Day-one setup and operations
+## Reference and advanced usage
 
-- [configuration.md](./configuration.md) — GUCs, `configure(...)`, profiles, secrets, permissions, allowlists, and model aliases.
-- [operations.md](./operations.md) — Docker, local test flows, and quality gates.
-
-## Reference and usage
-
-- [reference.md](./reference.md) — Function surface organized by domain.
-- [examples.md](./examples.md) — Copy-paste SQL examples for common production and local workflows.
-- [pgvector-integration.md](./pgvector-integration.md) — End-to-end vector search integration details.
-- [candle-roadmap.md](./candle-roadmap.md) — Current plan and limitations for local runtime features.
-- [architecture.md](./architecture.md) — Internal flow map for runtime, policy, and response handling.
+- [reference.md](./reference.md) — Complete SQL function index grouped by family.
+- [pgvector-integration.md](./pgvector-integration.md) — Vector integration patterns.
+- [candle-roadmap.md](./candle-roadmap.md) — Local runtime roadmap and known constraints.
 
 ## Recommended reading order
 
-1. [getting-started.md](./getting-started.md)
-2. [runtime.md](./runtime.md)
-3. [configuration.md](./configuration.md)
-4. [architecture.md](./architecture.md)
-5. [reference.md](./reference.md)
-6. [examples.md](./examples.md)
-7. [operations.md](./operations.md)
+1. [getting-started](./getting-started.md) → [runtime](./runtime.md) → [configuration](./configuration.md)
+2. [architecture](./architecture.md) → [reference](./reference.md)
+3. [examples](./examples.md) → [operations](./operations.md)
+
+## Minimum reading checklist before first production pilot
+
+- `getting-started`: confirm successful `CREATE EXTENSION` and a basic `chat_text(...)` call.
+- `configuration`: confirm `configure(...)`, `permissions`, and secret handling path.
+- `runtime`: confirm capability checks (`runtime_discover`, `runtime_ready`) with your target runtime.
+- `reference`: confirm expected functions for your top two workflows (chat + embeddings).
+- `operations`: confirm smoke path for startup and containerized checks.
+
+## Read once, then keep in your working set
+
+- Quick users: keep `getting-started`, `runtime`, and `examples` open.
+- Integrators: add `configuration`, `reference`, and `operations`.
+- Contributors: add `architecture` and `reference` for API ownership.

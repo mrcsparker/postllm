@@ -2,6 +2,7 @@
     clippy::redundant_pub_crate,
     reason = "this module exposes crate-private APIs across sibling modules"
 )]
+#![allow(unsafe_code)]
 
 use crate::error::{Error, Result};
 use pgrx::pg_sys;

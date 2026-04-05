@@ -5,6 +5,7 @@
 
 use crate::backend::{CandleDevice, Feature, RequestOptions, RerankResult, Settings};
 use crate::error::{Error, Result};
+use crate::enum_parser;
 use candle_core::safetensors::BufferedSafetensors;
 use candle_core::{DType, Device, Error as CandleCoreError, Shape, Tensor};
 use candle_nn::var_builder::SimpleBackend;
@@ -139,12 +140,22 @@ pub(crate) enum LocalModelEvictionScope {
 }
 
 impl LocalModelEvictionScope {
+    const VARIANTS: [(&'static str, Self); 3] = [
+        ("memory", Self::Memory),
+        ("disk", Self::Disk),
+        ("all", Self::All),
+    ];
+
     const fn as_str(self) -> &'static str {
         match self {
             Self::Memory => "memory",
             Self::Disk => "disk",
             Self::All => "all",
         }
+    }
+
+    pub(crate) fn parse(value: &str) -> Result<Self> {
+        enum_parser::parse_case_insensitive_with_default_error("scope", value, &Self::VARIANTS)
     }
 }
 
