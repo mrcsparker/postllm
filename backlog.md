@@ -230,7 +230,7 @@ Issues:
 - [x] `PL-067` Split `src/lib.rs` into bounded API surface modules (`api_config`, `api_messages`, `api_inference`, `api_retrieval`, `api_ops`) and keep each function file small and intention-revealing.
 - [x] `PL-077` Move SQL-facing API wrappers into `src/api/` (`config`, `messages`, `inference`, `retrieval`, `ops`) and remove `crate::api_*`-style call sites.
 - [ ] `PL-078` Consolidate repetitive enum parse/`Display` patterns (`Runtime`, `CandleDevice`, `ModelAliasLane`, `PermissionObjectType`, retrieval/scoping enums) into helper traits/macros or derive-based implementations to reduce duplicated matching and error text drift; target at least 300 lines deleted and clearer parser ownership.
-- [ ] `PL-068` Introduce a single `ExecutionContext` type for request lifecycle (`resolve -> validate -> enforce policy -> call runtime`) to remove duplicated logic in request entrypoints.
+- [x] `PL-068` Introduce a single `ExecutionContext` type for request lifecycle (`resolve -> validate -> enforce policy -> call runtime`) to remove duplicated logic in request entrypoints.
 - [ ] `PL-069` Extract shared SQL builder/lookup helpers from `guc`, `permissions`, `secrets`, and `catalog` into a common internal module to avoid duplicated SPI/error path patterns.
 - [x] `PL-070` Add a dedicated architecture map for request and permission flows to help future reviewers reason about control flow quickly.
 - [ ] `PL-071` Add a contributor-facing style guide for code ownership, naming, and complexity thresholds, and enforce it on new changes via review and CI.

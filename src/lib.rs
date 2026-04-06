@@ -8,6 +8,7 @@ pub(crate) mod catalog;
 pub(crate) mod client;
 pub(crate) mod enum_parser;
 pub(crate) mod error;
+pub(crate) mod execution;
 pub(crate) mod guc;
 pub(crate) mod http_policy;
 pub(crate) mod interrupt;
@@ -15,7 +16,6 @@ pub(crate) mod operator_policy;
 pub(crate) mod permissions;
 pub(crate) mod secrets;
 
-use crate::backend::RequestOptions;
 use crate::error::{Error, Result};
 use pgrx::JsonB;
 use pgrx::datum::DatumWithOid;
@@ -25,7 +25,6 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::Path;
-use std::time::Instant;
 
 ::pgrx::pg_module_magic!(name, version);
 
@@ -1810,64 +1809,35 @@ fn chat_impl_from_values(
     feature: backend::Feature,
     extensions: ChatRequestExtensions<'_>,
 ) -> Result<Value> {
-    let audit_config = guc::audit_config();
-    let request_payload = audit_config
-        .enabled
-        .then(|| chat_request_audit_payload(messages, temperature, max_tokens, extensions))
-        .map(|payload| maybe_redact_audit_payload(payload, audit_config.redact_inputs));
-    let started = Instant::now();
-    let mut audit_settings = None;
-
-    let result = (|| {
-        validate_request_controls(temperature, max_tokens)?;
-        let settings = guc::resolve(model)?;
-        let capabilities = backend::CapabilitySnapshot::from_settings(&settings, None);
-        capabilities.require(feature)?;
-
-        if extensions.response_format.is_some() {
-            capabilities.require(backend::Feature::StructuredOutputs)?;
-        }
-
-        if extensions.tools.is_some() || extensions.tool_choice.is_some() {
-            capabilities.require(backend::Feature::Tools)?;
-        }
-
-        if messages_require_multimodal_inputs(messages) {
-            capabilities.require(backend::Feature::MultimodalInputs)?;
-        }
-
-        let response = backend::chat_response(
-            &settings,
-            messages,
-            RequestOptions {
-                temperature,
-                max_tokens,
-            },
-            extensions.response_format,
-            extensions.tools,
-            extensions.tool_choice,
-        )?;
-        audit_settings = Some(settings);
-
-        Ok(response)
-    })();
-
-    if let Some(request_payload) = request_payload {
-        let response_payload = result.as_ref().ok().map(|response| {
-            maybe_redact_audit_payload(response.clone(), audit_config.redact_outputs)
-        });
-        maybe_record_request_audit(
-            audit_generation_operation(feature, false),
-            audit_config,
-            audit_settings.as_ref(),
-            request_payload,
-            response_payload,
-            result.as_ref().err(),
-            started,
-        );
-    }
-
-    result
+    execution::ExecutionContext::new(execution::generation_operation(feature, false), || {
+        chat_request_audit_payload(messages, temperature, max_tokens, extensions)
+    })
+    .run_generation(
+        model,
+        execution::GenerationRequirements {
+            feature,
+            temperature,
+            max_tokens,
+            streaming: false,
+            structured_outputs: extensions.response_format.is_some(),
+            tools: extensions.tools.is_some() || extensions.tool_choice.is_some(),
+            multimodal_inputs: messages_require_multimodal_inputs(messages),
+        },
+        |settings| {
+            backend::chat_response(
+                settings,
+                messages,
+                backend::RequestOptions {
+                    temperature,
+                    max_tokens,
+                },
+                extensions.response_format,
+                extensions.tools,
+                extensions.tool_choice,
+            )
+        },
+        Clone::clone,
+    )
 }
 
 fn stream_impl_from_values(
@@ -1877,62 +1847,39 @@ fn stream_impl_from_values(
     max_tokens: Option<i32>,
     feature: backend::Feature,
 ) -> Result<Vec<(i32, Option<String>, JsonB)>> {
-    let audit_config = guc::audit_config();
-    let request_payload = audit_config
-        .enabled
-        .then(|| {
-            chat_request_audit_payload(
-                messages,
-                temperature,
-                max_tokens,
-                ChatRequestExtensions::default(),
-            )
-        })
-        .map(|payload| maybe_redact_audit_payload(payload, audit_config.redact_inputs));
-    let started = Instant::now();
-    let mut audit_settings = None;
-
-    let result = (|| {
-        validate_request_controls(temperature, max_tokens)?;
-        let settings = guc::resolve(model)?;
-        let capabilities = backend::CapabilitySnapshot::from_settings(&settings, None);
-        capabilities.require(feature)?;
-        capabilities.require(backend::Feature::Streaming)?;
-
-        if messages_require_multimodal_inputs(messages) {
-            capabilities.require(backend::Feature::MultimodalInputs)?;
-        }
-
-        let events = backend::chat_stream_response(
-            &settings,
+    execution::ExecutionContext::new(execution::generation_operation(feature, true), || {
+        chat_request_audit_payload(
             messages,
-            RequestOptions {
-                temperature,
-                max_tokens,
-            },
-        )?;
-        audit_settings = Some(settings);
+            temperature,
+            max_tokens,
+            ChatRequestExtensions::default(),
+        )
+    })
+    .run_generation(
+        model,
+        execution::GenerationRequirements {
+            feature,
+            temperature,
+            max_tokens,
+            streaming: true,
+            structured_outputs: false,
+            tools: false,
+            multimodal_inputs: messages_require_multimodal_inputs(messages),
+        },
+        |settings| {
+            let events = backend::chat_stream_response(
+                settings,
+                messages,
+                backend::RequestOptions {
+                    temperature,
+                    max_tokens,
+                },
+            )?;
 
-        build_stream_rows(events)
-    })();
-
-    if let Some(request_payload) = request_payload {
-        let response_payload = result
-            .as_ref()
-            .ok()
-            .map(|rows| stream_rows_audit_payload(rows, audit_config.redact_outputs));
-        maybe_record_request_audit(
-            audit_generation_operation(feature, true),
-            audit_config,
-            audit_settings.as_ref(),
-            request_payload,
-            response_payload,
-            result.as_ref().err(),
-            started,
-        );
-    }
-
-    result
+            build_stream_rows(events)
+        },
+        |rows| stream_rows_audit_payload(rows),
+    )
 }
 
 fn build_stream_rows(events: Vec<Value>) -> Result<Vec<(i32, Option<String>, JsonB)>> {
@@ -1954,44 +1901,6 @@ fn build_stream_rows(events: Vec<Value>) -> Result<Vec<(i32, Option<String>, Jso
         .collect()
 }
 
-fn audit_generation_operation(feature: backend::Feature, streaming: bool) -> &'static str {
-    match (feature, streaming) {
-        (backend::Feature::Chat, false) => "chat",
-        (backend::Feature::Complete, false) => "complete",
-        (backend::Feature::Chat, true) => "chat_stream",
-        (backend::Feature::Complete, true) => "complete_stream",
-        _ => "chat",
-    }
-}
-
-fn maybe_record_request_audit(
-    operation: &str,
-    config: audit::AuditConfig,
-    settings: Option<&backend::Settings>,
-    request_payload: Value,
-    response_payload: Option<Value>,
-    error: Option<&Error>,
-    started: Instant,
-) {
-    audit::record_request(
-        config,
-        operation,
-        settings,
-        request_payload,
-        response_payload,
-        error,
-        started.elapsed(),
-    );
-}
-
-fn maybe_redact_audit_payload(payload: Value, redact: bool) -> Value {
-    if redact {
-        audit::redact_payload_fields(&payload)
-    } else {
-        payload
-    }
-}
-
 fn chat_request_audit_payload(
     messages: &[Value],
     temperature: f64,
@@ -2008,7 +1917,7 @@ fn chat_request_audit_payload(
     })
 }
 
-fn stream_rows_audit_payload(rows: &[(i32, Option<String>, JsonB)], redact_outputs: bool) -> Value {
+fn stream_rows_audit_payload(rows: &[(i32, Option<String>, JsonB)]) -> Value {
     let text = rows
         .iter()
         .filter_map(|(_, delta, _)| delta.as_deref())
@@ -2019,7 +1928,7 @@ fn stream_rows_audit_payload(rows: &[(i32, Option<String>, JsonB)], redact_outpu
         "text": text,
     });
 
-    maybe_redact_audit_payload(payload, redact_outputs)
+    payload
 }
 
 fn embed_impl(input: &str, model: Option<&str>, normalize: bool) -> Result<Vec<f32>> {
@@ -2764,45 +2673,19 @@ fn embed_many_impl(
         ));
     }
 
-    let audit_config = guc::audit_config();
-    let request_payload = audit_config
-        .enabled
-        .then(|| embed_request_audit_payload(inputs, normalize))
-        .map(|payload| maybe_redact_audit_payload(payload, audit_config.redact_inputs));
-    let started = Instant::now();
-    let mut audit_settings = None;
+    execution::ExecutionContext::new("embed", || embed_request_audit_payload(inputs, normalize))
+        .run_embedding(
+            model,
+            |settings| {
+                let validated_inputs = inputs
+                    .iter()
+                    .map(|input| require_non_blank("input", input).map(str::to_owned))
+                    .collect::<Result<Vec<_>>>()?;
 
-    let result = (|| {
-        let validated_inputs = inputs
-            .iter()
-            .map(|input| require_non_blank("input", input).map(str::to_owned))
-            .collect::<Result<Vec<_>>>()?;
-        let settings = guc::resolve_embedding_settings(model)?;
-        let vectors = candle::embed(&settings, &validated_inputs, normalize)?;
-        audit_settings = Some(settings);
-
-        Ok(vectors)
-    })();
-
-    if let Some(request_payload) = request_payload {
-        let response_payload = result.as_ref().ok().map(|vectors| {
-            maybe_redact_audit_payload(
-                embed_response_audit_payload(vectors, normalize),
-                audit_config.redact_outputs,
-            )
-        });
-        maybe_record_request_audit(
-            "embed",
-            audit_config,
-            audit_settings.as_ref(),
-            request_payload,
-            response_payload,
-            result.as_ref().err(),
-            started,
-        );
-    }
-
-    result
+                candle::embed(settings, &validated_inputs, normalize)
+            },
+            |vectors| embed_response_audit_payload(vectors, normalize),
+        )
 }
 
 fn embed_request_audit_payload(inputs: &[String], normalize: bool) -> Value {
@@ -3072,52 +2955,24 @@ fn semantic_rank_results(
     model: Option<&str>,
     top_n: Option<usize>,
 ) -> Result<Vec<RankedDocument>> {
-    let audit_config = guc::audit_config();
-    let request_payload = audit_config
-        .enabled
-        .then(|| rerank_request_audit_payload(query, documents, top_n))
-        .map(|payload| maybe_redact_audit_payload(payload, audit_config.redact_inputs));
-    let started = Instant::now();
-    let mut audit_settings = None;
+    execution::ExecutionContext::new("rerank", || {
+        rerank_request_audit_payload(query, documents, top_n)
+    })
+    .run_rerank(
+        model,
+        |settings| {
+            let ranked = backend::rerank_response(settings, query, documents, top_n)?
+                .into_iter()
+                .map(|result| RankedDocument {
+                    index: result.index,
+                    score: result.score,
+                })
+                .collect::<Vec<_>>();
 
-    let result = (|| {
-        let settings = guc::resolve_rerank(model)?;
-        let embedding_model =
-            matches!(settings.runtime, backend::Runtime::Candle).then_some(settings.model.as_str());
-        let capabilities = backend::CapabilitySnapshot::from_settings(&settings, embedding_model);
-        capabilities.require(backend::Feature::Reranking)?;
-
-        let ranked = backend::rerank_response(&settings, query, documents, top_n)?
-            .into_iter()
-            .map(|result| RankedDocument {
-                index: result.index,
-                score: result.score,
-            })
-            .collect::<Vec<_>>();
-        audit_settings = Some(settings);
-
-        Ok(ranked)
-    })();
-
-    if let Some(request_payload) = request_payload {
-        let response_payload = result.as_ref().ok().map(|ranked| {
-            maybe_redact_audit_payload(
-                rerank_response_audit_payload(documents, ranked),
-                audit_config.redact_outputs,
-            )
-        });
-        maybe_record_request_audit(
-            "rerank",
-            audit_config,
-            audit_settings.as_ref(),
-            request_payload,
-            response_payload,
-            result.as_ref().err(),
-            started,
-        );
-    }
-
-    result
+            Ok(ranked)
+        },
+        |ranked| rerank_response_audit_payload(documents, ranked),
+    )
 }
 
 fn rerank_request_audit_payload(query: &str, documents: &[String], top_n: Option<usize>) -> Value {
@@ -4178,7 +4033,7 @@ const fn hex_digit(value: u8) -> char {
     }
 }
 
-fn validate_request_controls(temperature: f64, max_tokens: Option<i32>) -> Result<()> {
+pub(crate) fn validate_request_controls(temperature: f64, max_tokens: Option<i32>) -> Result<()> {
     if !(0.0..=2.0).contains(&temperature) {
         return Err(Error::invalid_argument(
             "temperature",
@@ -4216,7 +4071,7 @@ fn validate_messages(messages: &[JsonB]) -> Result<Vec<Value>> {
         .collect()
 }
 
-fn messages_require_multimodal_inputs(messages: &[Value]) -> bool {
+pub(crate) fn messages_require_multimodal_inputs(messages: &[Value]) -> bool {
     messages.iter().any(message_requires_multimodal_inputs)
 }
 
