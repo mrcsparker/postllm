@@ -4,8 +4,8 @@
 )]
 
 use crate::backend::Runtime;
-use crate::error::{Error, Result};
 use crate::enum_parser;
+use crate::error::{Error, Result};
 use crate::operator_policy;
 use pgrx::JsonB;
 use pgrx::datum::DatumWithOid;
@@ -14,7 +14,7 @@ use pgrx::spi::Spi;
 use serde_json::Value;
 
 const WILDCARD_TARGET: &str = "*";
-const PRIVILEGED_SETTINGS: [&str; 11] = [
+const PRIVILEGED_SETTINGS: [&str; 14] = [
     "base_url",
     "api_key",
     "api_key_secret",
@@ -26,6 +26,9 @@ const PRIVILEGED_SETTINGS: [&str; 11] = [
     "candle_device",
     "candle_max_input_tokens",
     "candle_max_concurrency",
+    "request_logging",
+    "request_log_redact_inputs",
+    "request_log_redact_outputs",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,8 +44,6 @@ impl PermissionObjectType {
     pub(crate) const GENERATION_MODEL: &'static str = "generation_model";
     pub(crate) const EMBEDDING_MODEL: &'static str = "embedding_model";
     pub(crate) const SETTING: &'static str = "setting";
-    pub(crate) const ACCEPTED_VALUES: &'static str =
-        "'runtime', 'generation_model', 'embedding_model', or 'setting'";
     const VARIANTS: [(&'static str, Self); 4] = [
         (Self::RUNTIME, Self::Runtime),
         (Self::GENERATION_MODEL, Self::GenerationModel),
@@ -61,15 +62,7 @@ impl PermissionObjectType {
     }
 
     pub(crate) fn parse(argument: &str, value: &str) -> Result<Self> {
-        let normalized = require_non_blank(argument, value)?;
-        enum_parser::parse_case_insensitive(normalized, &Self::VARIANTS).map_err(|unknown| {
-            let accepted = enum_parser::format_variant_values(&Self::VARIANTS);
-            Error::invalid_argument(
-                argument,
-                format!("must be one of {accepted}, got '{unknown}'"),
-                format!("pass {argument} => {accepted}"),
-            )
-        })
+        enum_parser::parse_case_insensitive_required(argument, value, &Self::VARIANTS)
     }
 }
 
@@ -451,8 +444,7 @@ mod test {
     #[test]
     fn parse_permission_object_type_should_accept_supported_values() {
         assert_eq!(
-            PermissionObjectType::parse("object_type", "runtime")
-                .expect("runtime should parse"),
+            PermissionObjectType::parse("object_type", "runtime").expect("runtime should parse"),
             PermissionObjectType::Runtime
         );
         assert_eq!(

@@ -2,7 +2,7 @@
 
 This file is the execution plan for turning `postllm` into a serious PostgreSQL-native LLM extension.
 
-Current professional-quality rating (rough, no tests, subjective): **6/10**.
+Current professional-quality rating (rough, tested, subjective): **8/10**.
 
 This score is not a verdict on feature completeness; it is an assessment of code-readability, maintainability structure, and release confidence.
 The highest priority before public release is to complete the Release Gate items and raise this score to 8+.
@@ -20,6 +20,16 @@ The ordering is intentional:
 - `postllm.embed(...)` and `postllm.embed_many(...)` work locally through Candle.
 - Session configuration is handled through `postllm.configure(...)` and GUCs.
 - The repo already has unit tests, `pgrx` SQL tests, and Docker smoke tests.
+
+## Verification Snapshot
+
+Last manually verified in-repo on 2026-04-05:
+
+- `cargo test --lib` passed.
+- `bash scripts/e2e_llama.sh` passed.
+- `bash scripts/e2e_candle.sh` passed.
+
+This snapshot confirms the current hosted `llama-server` Docker lane and the local Candle Docker lane are both green. Keep this section current when backlog status is updated so the plan stays anchored to a real checked state instead of a guessed one.
 
 ## Milestone 1: Local Generation Foundation
 
@@ -140,7 +150,7 @@ Issues:
 - [x] `PL-037` Add a proper secret-management story for provider credentials.
 - [x] `PL-038` Add role-aware permission controls for runtimes, models, and privileged settings.
 - [x] `PL-039` Add network allowlists and provider safelists for HTTP runtimes.
-- [ ] `PL-040` Add request logging and audit trails with opt-in prompt/response redaction.
+- [x] `PL-040` Add request logging and audit trails with opt-in prompt/response redaction.
 - [ ] `PL-041` Add metrics views for latency, errors, token usage, and request counts.
 - [ ] `PL-042` Add quotas and guardrails for token budget, runtime budget, and spend.
 - [ ] `PL-043` Add backpressure controls so concurrent model work cannot overwhelm the database.

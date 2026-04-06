@@ -3,8 +3,8 @@
     reason = "this module exposes crate-private APIs across sibling modules"
 )]
 
-use crate::error::{Error, Result};
 use crate::enum_parser;
+use crate::error::{Error, Result};
 use crate::guc::SessionOverrides;
 use crate::secrets::StoredSecret;
 use pgrx::JsonB;
@@ -38,16 +38,7 @@ impl ModelAliasLane {
     }
 
     pub(crate) fn parse(argument: &str, value: &str) -> Result<Self> {
-        let normalized = require_non_blank(argument, value)?;
-        enum_parser::parse_case_insensitive(normalized, &Self::VARIANTS)
-            .map_err(|unknown| {
-                let accepted = enum_parser::format_variant_values(&Self::VARIANTS);
-                Error::invalid_argument(
-                    argument,
-                    format!("must be one of {accepted}, got '{unknown}'"),
-                    format!("pass {argument} => {accepted}"),
-                )
-            })
+        enum_parser::parse_case_insensitive_required(argument, value, &Self::VARIANTS)
     }
 }
 

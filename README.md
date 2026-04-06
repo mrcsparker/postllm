@@ -85,6 +85,15 @@ Inference runs inside PostgreSQL backends. Before running in shared environments
 - `http_allowed_hosts` and `http_allowed_providers` for outbound HTTP policy.
 - `model_alias*` and profiles for deterministic runtime configuration.
 
+## Validation
+
+The repository includes two Docker end-to-end smoke suites:
+
+- `./scripts/e2e_llama.sh` for the hosted OpenAI-compatible lane via `llama-server`
+- `./scripts/e2e_candle.sh` for the local Candle lane
+
+They are documented in [docs/operations.md](./docs/operations.md#end-to-end-checks).
+
 Deeper topic docs:
 
 - [Local Candle roadmap](./docs/candle-roadmap.md)

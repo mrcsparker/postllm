@@ -3,6 +3,7 @@
     reason = "this module exposes crate-private APIs across sibling modules"
 )]
 
+use crate::audit::AuditConfig;
 use crate::backend::{CandleDevice, Runtime, Settings};
 use crate::error::{Error, Result};
 use crate::permissions;
@@ -23,6 +24,8 @@ pub(crate) const DEFAULT_API_KEY_SECRET: &str = "";
 pub(crate) const DEFAULT_CANDLE_DEVICE: &str = CandleDevice::AUTO;
 pub(crate) const DEFAULT_CANDLE_MAX_INPUT_TOKENS: i32 = 0;
 pub(crate) const DEFAULT_CANDLE_MAX_CONCURRENCY: i32 = 0;
+pub(crate) const DEFAULT_REQUEST_LOG_REDACT_INPUTS: bool = true;
+pub(crate) const DEFAULT_REQUEST_LOG_REDACT_OUTPUTS: bool = true;
 const PROFILE_MANAGED_STRING_DEFAULTS: [(&str, &str); 7] = [
     ("postllm.base_url", DEFAULT_BASE_URL),
     ("postllm.runtime", DEFAULT_RUNTIME),
@@ -71,6 +74,9 @@ static POSTLLM_CANDLE_DEVICE: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(c"auto"));
 static POSTLLM_CANDLE_MAX_INPUT_TOKENS: GucSetting<i32> = GucSetting::<i32>::new(0);
 static POSTLLM_CANDLE_MAX_CONCURRENCY: GucSetting<i32> = GucSetting::<i32>::new(0);
+static POSTLLM_REQUEST_LOGGING: GucSetting<bool> = GucSetting::<bool>::new(false);
+static POSTLLM_REQUEST_LOG_REDACT_INPUTS: GucSetting<bool> = GucSetting::<bool>::new(true);
+static POSTLLM_REQUEST_LOG_REDACT_OUTPUTS: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 /// Fully resolved setting inputs shared by all request-setting builders.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,6 +299,7 @@ pub(crate) fn register() {
     register_core_runtime_gucs();
     register_hosted_runtime_gucs();
     register_candle_runtime_gucs();
+    register_audit_gucs();
 }
 
 fn register_core_runtime_gucs() {
@@ -455,6 +462,35 @@ fn register_candle_runtime_gucs() {
     );
 }
 
+fn register_audit_gucs() {
+    GucRegistry::define_bool_guc(
+        c"postllm.request_logging",
+        c"Whether postllm should persist request audit rows.",
+        c"When enabled, postllm writes one audit row per chat, stream, embedding, or rerank request into postllm.request_audit_log.",
+        &POSTLLM_REQUEST_LOGGING,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_bool_guc(
+        c"postllm.request_log_redact_inputs",
+        c"Whether postllm should redact prompt and input fields in audit rows.",
+        c"When enabled, prompt-like audit payload fields such as messages, prompts, queries, and embedding inputs are persisted as [redacted] markers instead of raw text.",
+        &POSTLLM_REQUEST_LOG_REDACT_INPUTS,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_bool_guc(
+        c"postllm.request_log_redact_outputs",
+        c"Whether postllm should redact completion and response fields in audit rows.",
+        c"When enabled, completion-like audit payload fields such as response text, streamed deltas, and reranked documents are persisted as [redacted] markers instead of raw text.",
+        &POSTLLM_REQUEST_LOG_REDACT_OUTPUTS,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+}
+
 /// Resolves the current backend settings, optionally overriding the model for one request.
 pub(crate) fn resolve(model_override: Option<&str>) -> Result<Settings> {
     let inputs = resolve_setting_inputs()?;
@@ -553,6 +589,16 @@ pub(crate) fn resolve_http_allowed_providers() -> Result<Vec<String>> {
         string_setting(&POSTLLM_HTTP_ALLOWED_PROVIDERS).as_deref(),
         "postllm.http_allowed_providers",
     )
+}
+
+/// Resolves the current request-audit logging controls.
+#[must_use]
+pub(crate) fn audit_config() -> AuditConfig {
+    AuditConfig {
+        enabled: POSTLLM_REQUEST_LOGGING.get(),
+        redact_inputs: POSTLLM_REQUEST_LOG_REDACT_INPUTS.get(),
+        redact_outputs: POSTLLM_REQUEST_LOG_REDACT_OUTPUTS.get(),
+    }
 }
 
 fn resolve_setting_inputs() -> Result<ResolvedSettingInputs> {
@@ -682,6 +728,9 @@ pub(crate) fn snapshot() -> Value {
         "candle_device": string_setting(&POSTLLM_CANDLE_DEVICE),
         "candle_max_input_tokens": POSTLLM_CANDLE_MAX_INPUT_TOKENS.get(),
         "candle_max_concurrency": POSTLLM_CANDLE_MAX_CONCURRENCY.get(),
+        "request_logging": POSTLLM_REQUEST_LOGGING.get(),
+        "request_log_redact_inputs": POSTLLM_REQUEST_LOG_REDACT_INPUTS.get(),
+        "request_log_redact_outputs": POSTLLM_REQUEST_LOG_REDACT_OUTPUTS.get(),
         "capabilities": capabilities_snapshot(),
     })
 }
@@ -975,6 +1024,17 @@ pub(crate) fn ensure_active_privileged_settings_allowed() -> Result<()> {
         "candle_max_concurrency",
     )?;
     ensure_true_setting_allowed(POSTLLM_CANDLE_OFFLINE.get(), "candle_offline")?;
+    ensure_true_setting_allowed(POSTLLM_REQUEST_LOGGING.get(), "request_logging")?;
+    ensure_non_default_bool_setting_allowed(
+        POSTLLM_REQUEST_LOG_REDACT_INPUTS.get(),
+        DEFAULT_REQUEST_LOG_REDACT_INPUTS,
+        "request_log_redact_inputs",
+    )?;
+    ensure_non_default_bool_setting_allowed(
+        POSTLLM_REQUEST_LOG_REDACT_OUTPUTS.get(),
+        DEFAULT_REQUEST_LOG_REDACT_OUTPUTS,
+        "request_log_redact_outputs",
+    )?;
 
     Ok(())
 }
@@ -1008,6 +1068,18 @@ fn ensure_non_default_string_setting_allowed(
 fn ensure_non_default_i32_setting_allowed(
     value: i32,
     default_value: i32,
+    permission_name: &str,
+) -> Result<()> {
+    if value != default_value {
+        permissions::ensure_setting_change_allowed(permission_name)?;
+    }
+
+    Ok(())
+}
+
+fn ensure_non_default_bool_setting_allowed(
+    value: bool,
+    default_value: bool,
     permission_name: &str,
 ) -> Result<()> {
     if value != default_value {

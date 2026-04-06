@@ -4,8 +4,8 @@
 )]
 
 use crate::backend::{CandleDevice, Feature, RequestOptions, RerankResult, Settings};
-use crate::error::{Error, Result};
 use crate::enum_parser;
+use crate::error::{Error, Result};
 use candle_core::safetensors::BufferedSafetensors;
 use candle_core::{DType, Device, Error as CandleCoreError, Shape, Tensor};
 use candle_nn::var_builder::SimpleBackend;

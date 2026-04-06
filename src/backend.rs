@@ -3,8 +3,8 @@
     reason = "this module exposes crate-private APIs across sibling modules"
 )]
 
-use crate::error::{Error, Result};
 use crate::enum_parser;
+use crate::error::{Error, Result};
 use serde_json::{Map, Value, json};
 
 const POSTLLM_METADATA_KEY: &str = "_postllm";
@@ -21,10 +21,8 @@ pub(crate) enum Runtime {
 impl Runtime {
     pub(crate) const OPENAI: &'static str = "openai";
     pub(crate) const CANDLE: &'static str = "candle";
-    const VARIANTS: [(&'static str, Self); 2] = [
-        (Self::OPENAI, Self::OpenAi),
-        (Self::CANDLE, Self::Candle),
-    ];
+    const VARIANTS: [(&'static str, Self); 2] =
+        [(Self::OPENAI, Self::OpenAi), (Self::CANDLE, Self::Candle)];
 
     /// Returns the canonical configuration string for this runtime.
     #[must_use]
@@ -81,7 +79,7 @@ impl CandleDevice {
     /// Parses a user-supplied Candle device preference.
     #[must_use]
     pub(crate) fn parse(value: &str) -> Option<Self> {
-        enum_parser::parse_case_insensitive(value, &Self::VARIANTS).ok()
+        enum_parser::parse_case_insensitive_optional(value, &Self::VARIANTS)
     }
 }
 
@@ -992,9 +990,9 @@ fn content_text(content: &Value) -> Option<String> {
 )]
 mod tests {
     use super::{
-        CapabilitySnapshot, CandleDevice, Feature, RequestOptions, Runtime, Settings, choice,
-        finish_reason,
-        normalize_response_metadata, normalize_stream_event, stream_text_delta, usage,
+        CandleDevice, CapabilitySnapshot, Feature, RequestOptions, Runtime, Settings, choice,
+        finish_reason, normalize_response_metadata, normalize_stream_event, stream_text_delta,
+        usage,
     };
     use crate::backend::test_support::SettingsBuilder;
     use serde_json::json;
@@ -1345,15 +1343,24 @@ mod tests {
 
     #[test]
     fn runtime_parse_should_accept_supported_values() {
-        assert_eq!(Runtime::parse("openai").expect("openai should parse"), Runtime::OpenAi);
-        assert_eq!(Runtime::parse("OpenAI").expect("case-insensitive parsing should work"), Runtime::OpenAi);
-        assert_eq!(Runtime::parse("CANDLE").expect("case-insensitive parsing should work"), Runtime::Candle);
+        assert_eq!(
+            Runtime::parse("openai").expect("openai should parse"),
+            Runtime::OpenAi
+        );
+        assert_eq!(
+            Runtime::parse("OpenAI").expect("case-insensitive parsing should work"),
+            Runtime::OpenAi
+        );
+        assert_eq!(
+            Runtime::parse("CANDLE").expect("case-insensitive parsing should work"),
+            Runtime::Candle
+        );
     }
 
     #[test]
     fn runtime_parse_should_reject_unknown_values() {
-        let error = Runtime::parse("invalid")
-            .expect_err("unknown runtime values should be rejected");
+        let error =
+            Runtime::parse("invalid").expect_err("unknown runtime values should be rejected");
 
         assert_eq!(
             error.to_string(),

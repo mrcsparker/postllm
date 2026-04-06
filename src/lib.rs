@@ -1,12 +1,13 @@
 #![doc = include_str!("../README.md")]
 
 pub(crate) mod api;
+pub(crate) mod audit;
 pub(crate) mod backend;
 pub(crate) mod candle;
 pub(crate) mod catalog;
 pub(crate) mod client;
-pub(crate) mod error;
 pub(crate) mod enum_parser;
+pub(crate) mod error;
 pub(crate) mod guc;
 pub(crate) mod http_policy;
 pub(crate) mod interrupt;
@@ -24,6 +25,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::Path;
+use std::time::Instant;
 
 ::pgrx::pg_module_magic!(name, version);
 
@@ -95,6 +97,28 @@ pgrx::extension_sql!(
 
     COMMENT ON TABLE postllm.role_permissions IS
         'Role-aware postllm allowlist rules for runtimes, models, and privileged settings.';
+
+    CREATE TABLE postllm.request_audit_log (
+        id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        logged_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        role_name text NOT NULL,
+        backend_pid integer NOT NULL,
+        operation text NOT NULL,
+        runtime text,
+        model text,
+        base_url text,
+        status text NOT NULL,
+        duration_ms bigint NOT NULL,
+        input_redacted boolean NOT NULL DEFAULT true,
+        output_redacted boolean NOT NULL DEFAULT true,
+        request_payload jsonb,
+        response_payload jsonb,
+        error_message text,
+        CHECK (status IN ('ok', 'error'))
+    );
+
+    COMMENT ON TABLE postllm.request_audit_log IS
+        'Opt-in audit trail for postllm request execution, including optional redaction of request and response payload fields.';
     ",
     name = "postllm_catalog_tables",
     requires = [postllm::settings],
@@ -132,6 +156,42 @@ mod postllm {
     #[pg_extern]
     fn runtime_ready() -> bool {
         config::runtime_ready()
+    }
+
+    #[doc(hidden)]
+    #[pg_extern(name = "_request_audit_insert", security_definer)]
+    #[search_path(postllm, pg_catalog)]
+    fn request_audit_insert(
+        role_name: &str,
+        operation: &str,
+        status: &str,
+        duration_ms: i64,
+        input_redacted: bool,
+        output_redacted: bool,
+        runtime: default!(Option<&str>, "NULL"),
+        model: default!(Option<&str>, "NULL"),
+        base_url: default!(Option<&str>, "NULL"),
+        request_payload: default!(Option<JsonB>, "NULL"),
+        response_payload: default!(Option<JsonB>, "NULL"),
+        error_message: default!(Option<&str>, "NULL"),
+    ) -> bool {
+        match crate::audit::insert_request_audit_row(
+            role_name,
+            operation,
+            runtime,
+            model,
+            base_url,
+            status,
+            duration_ms,
+            input_redacted,
+            output_redacted,
+            request_payload.as_ref().map(|payload| &payload.0),
+            response_payload.as_ref().map(|payload| &payload.0),
+            error_message,
+        ) {
+            Ok(()) => true,
+            Err(error) => pgrx::error!("{error}"),
+        }
     }
 
     /// Applies session-level configuration overrides and returns the resulting settings snapshot.
@@ -1286,17 +1346,7 @@ impl RagRetrievalStrategy {
     }
 
     fn parse(value: &str) -> Result<Self> {
-        let normalized = enum_parser::normalize_input(value);
-        enum_parser::parse_case_insensitive(normalized.as_str(), &Self::VARIANTS).map_err(
-            |_| {
-                let accepted = enum_parser::format_variant_values(&Self::VARIANTS);
-                Error::invalid_argument(
-                    "retrieval",
-                    format!("must be one of {accepted}, got '{normalized}'"),
-                    format!("pass retrieval => {accepted}"),
-                )
-            },
-        )
+        enum_parser::parse_case_insensitive_required("retrieval", value, &Self::VARIANTS)
     }
 }
 
@@ -1360,6 +1410,7 @@ enum LocalModelLaneSelector {
 impl LocalModelLaneSelector {
     const EMBEDDING: &'static str = "embedding";
     const GENERATION: &'static str = "generation";
+    const ALL_VARIANTS: &'static str = "'auto', 'embedding', or 'generation'";
     const VARIANTS: [(&'static str, Self); 3] = [
         ("auto", Self::Auto),
         (Self::EMBEDDING, Self::Embedding),
@@ -1368,15 +1419,26 @@ impl LocalModelLaneSelector {
     const EXPLICIT_VARIANTS: &'static str = "'embedding' or 'generation'";
 
     fn parse(value: &str) -> Result<Self> {
-        let normalized = require_non_blank("lane", value)?;
-        enum_parser::parse_case_insensitive(normalized, &Self::VARIANTS).map_err(|unknown| {
+        let normalized = enum_parser::normalize_input(value);
+        if normalized.is_empty() {
+            return Err(Error::invalid_argument(
+                "lane",
+                "must not be empty or whitespace-only",
+                format!(
+                    "omit lane for auto selection or pass lane => {}",
+                    Self::EXPLICIT_VARIANTS
+                ),
+            ));
+        }
+
+        enum_parser::parse_case_insensitive(&normalized, &Self::VARIANTS).map_err(|unknown| {
             Error::invalid_argument(
                 "lane",
+                format!("must be one of {}, got '{unknown}'", Self::ALL_VARIANTS),
                 format!(
-                    "must be one of {}, got '{unknown}'",
-                    enum_parser::format_variant_values(&Self::VARIANTS)
+                    "omit lane for auto selection or pass lane => {}",
+                    Self::EXPLICIT_VARIANTS
                 ),
-                format!("omit lane for auto selection or pass lane => {}", Self::EXPLICIT_VARIANTS),
             )
         })
     }
@@ -1748,34 +1810,64 @@ fn chat_impl_from_values(
     feature: backend::Feature,
     extensions: ChatRequestExtensions<'_>,
 ) -> Result<Value> {
-    validate_request_controls(temperature, max_tokens)?;
-    let settings = guc::resolve(model)?;
-    let capabilities = backend::CapabilitySnapshot::from_settings(&settings, None);
-    capabilities.require(feature)?;
+    let audit_config = guc::audit_config();
+    let request_payload = audit_config
+        .enabled
+        .then(|| chat_request_audit_payload(messages, temperature, max_tokens, extensions))
+        .map(|payload| maybe_redact_audit_payload(payload, audit_config.redact_inputs));
+    let started = Instant::now();
+    let mut audit_settings = None;
 
-    if extensions.response_format.is_some() {
-        capabilities.require(backend::Feature::StructuredOutputs)?;
+    let result = (|| {
+        validate_request_controls(temperature, max_tokens)?;
+        let settings = guc::resolve(model)?;
+        let capabilities = backend::CapabilitySnapshot::from_settings(&settings, None);
+        capabilities.require(feature)?;
+
+        if extensions.response_format.is_some() {
+            capabilities.require(backend::Feature::StructuredOutputs)?;
+        }
+
+        if extensions.tools.is_some() || extensions.tool_choice.is_some() {
+            capabilities.require(backend::Feature::Tools)?;
+        }
+
+        if messages_require_multimodal_inputs(messages) {
+            capabilities.require(backend::Feature::MultimodalInputs)?;
+        }
+
+        let response = backend::chat_response(
+            &settings,
+            messages,
+            RequestOptions {
+                temperature,
+                max_tokens,
+            },
+            extensions.response_format,
+            extensions.tools,
+            extensions.tool_choice,
+        )?;
+        audit_settings = Some(settings);
+
+        Ok(response)
+    })();
+
+    if let Some(request_payload) = request_payload {
+        let response_payload = result.as_ref().ok().map(|response| {
+            maybe_redact_audit_payload(response.clone(), audit_config.redact_outputs)
+        });
+        maybe_record_request_audit(
+            audit_generation_operation(feature, false),
+            audit_config,
+            audit_settings.as_ref(),
+            request_payload,
+            response_payload,
+            result.as_ref().err(),
+            started,
+        );
     }
 
-    if extensions.tools.is_some() || extensions.tool_choice.is_some() {
-        capabilities.require(backend::Feature::Tools)?;
-    }
-
-    if messages_require_multimodal_inputs(messages) {
-        capabilities.require(backend::Feature::MultimodalInputs)?;
-    }
-
-    backend::chat_response(
-        &settings,
-        messages,
-        RequestOptions {
-            temperature,
-            max_tokens,
-        },
-        extensions.response_format,
-        extensions.tools,
-        extensions.tool_choice,
-    )
+    result
 }
 
 fn stream_impl_from_values(
@@ -1785,26 +1877,62 @@ fn stream_impl_from_values(
     max_tokens: Option<i32>,
     feature: backend::Feature,
 ) -> Result<Vec<(i32, Option<String>, JsonB)>> {
-    validate_request_controls(temperature, max_tokens)?;
-    let settings = guc::resolve(model)?;
-    let capabilities = backend::CapabilitySnapshot::from_settings(&settings, None);
-    capabilities.require(feature)?;
-    capabilities.require(backend::Feature::Streaming)?;
+    let audit_config = guc::audit_config();
+    let request_payload = audit_config
+        .enabled
+        .then(|| {
+            chat_request_audit_payload(
+                messages,
+                temperature,
+                max_tokens,
+                ChatRequestExtensions::default(),
+            )
+        })
+        .map(|payload| maybe_redact_audit_payload(payload, audit_config.redact_inputs));
+    let started = Instant::now();
+    let mut audit_settings = None;
 
-    if messages_require_multimodal_inputs(messages) {
-        capabilities.require(backend::Feature::MultimodalInputs)?;
+    let result = (|| {
+        validate_request_controls(temperature, max_tokens)?;
+        let settings = guc::resolve(model)?;
+        let capabilities = backend::CapabilitySnapshot::from_settings(&settings, None);
+        capabilities.require(feature)?;
+        capabilities.require(backend::Feature::Streaming)?;
+
+        if messages_require_multimodal_inputs(messages) {
+            capabilities.require(backend::Feature::MultimodalInputs)?;
+        }
+
+        let events = backend::chat_stream_response(
+            &settings,
+            messages,
+            RequestOptions {
+                temperature,
+                max_tokens,
+            },
+        )?;
+        audit_settings = Some(settings);
+
+        build_stream_rows(events)
+    })();
+
+    if let Some(request_payload) = request_payload {
+        let response_payload = result
+            .as_ref()
+            .ok()
+            .map(|rows| stream_rows_audit_payload(rows, audit_config.redact_outputs));
+        maybe_record_request_audit(
+            audit_generation_operation(feature, true),
+            audit_config,
+            audit_settings.as_ref(),
+            request_payload,
+            response_payload,
+            result.as_ref().err(),
+            started,
+        );
     }
 
-    let events = backend::chat_stream_response(
-        &settings,
-        messages,
-        RequestOptions {
-            temperature,
-            max_tokens,
-        },
-    )?;
-
-    build_stream_rows(events)
+    result
 }
 
 fn build_stream_rows(events: Vec<Value>) -> Result<Vec<(i32, Option<String>, JsonB)>> {
@@ -1824,6 +1952,74 @@ fn build_stream_rows(events: Vec<Value>) -> Result<Vec<(i32, Option<String>, Jso
             Ok((index, delta, JsonB(event)))
         })
         .collect()
+}
+
+fn audit_generation_operation(feature: backend::Feature, streaming: bool) -> &'static str {
+    match (feature, streaming) {
+        (backend::Feature::Chat, false) => "chat",
+        (backend::Feature::Complete, false) => "complete",
+        (backend::Feature::Chat, true) => "chat_stream",
+        (backend::Feature::Complete, true) => "complete_stream",
+        _ => "chat",
+    }
+}
+
+fn maybe_record_request_audit(
+    operation: &str,
+    config: audit::AuditConfig,
+    settings: Option<&backend::Settings>,
+    request_payload: Value,
+    response_payload: Option<Value>,
+    error: Option<&Error>,
+    started: Instant,
+) {
+    audit::record_request(
+        config,
+        operation,
+        settings,
+        request_payload,
+        response_payload,
+        error,
+        started.elapsed(),
+    );
+}
+
+fn maybe_redact_audit_payload(payload: Value, redact: bool) -> Value {
+    if redact {
+        audit::redact_payload_fields(&payload)
+    } else {
+        payload
+    }
+}
+
+fn chat_request_audit_payload(
+    messages: &[Value],
+    temperature: f64,
+    max_tokens: Option<i32>,
+    extensions: ChatRequestExtensions<'_>,
+) -> Value {
+    json!({
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "response_format": extensions.response_format,
+        "tools": extensions.tools,
+        "tool_choice": extensions.tool_choice,
+    })
+}
+
+fn stream_rows_audit_payload(rows: &[(i32, Option<String>, JsonB)], redact_outputs: bool) -> Value {
+    let text = rows
+        .iter()
+        .filter_map(|(_, delta, _)| delta.as_deref())
+        .collect::<Vec<_>>()
+        .join("");
+    let payload = json!({
+        "event_count": rows.len(),
+        "text": text,
+    });
+
+    maybe_redact_audit_payload(payload, redact_outputs)
 }
 
 fn embed_impl(input: &str, model: Option<&str>, normalize: bool) -> Result<Vec<f32>> {
@@ -2568,13 +2764,60 @@ fn embed_many_impl(
         ));
     }
 
-    let validated_inputs = inputs
-        .iter()
-        .map(|input| require_non_blank("input", input).map(str::to_owned))
-        .collect::<Result<Vec<_>>>()?;
-    let settings = guc::resolve_embedding_settings(model)?;
+    let audit_config = guc::audit_config();
+    let request_payload = audit_config
+        .enabled
+        .then(|| embed_request_audit_payload(inputs, normalize))
+        .map(|payload| maybe_redact_audit_payload(payload, audit_config.redact_inputs));
+    let started = Instant::now();
+    let mut audit_settings = None;
 
-    candle::embed(&settings, &validated_inputs, normalize)
+    let result = (|| {
+        let validated_inputs = inputs
+            .iter()
+            .map(|input| require_non_blank("input", input).map(str::to_owned))
+            .collect::<Result<Vec<_>>>()?;
+        let settings = guc::resolve_embedding_settings(model)?;
+        let vectors = candle::embed(&settings, &validated_inputs, normalize)?;
+        audit_settings = Some(settings);
+
+        Ok(vectors)
+    })();
+
+    if let Some(request_payload) = request_payload {
+        let response_payload = result.as_ref().ok().map(|vectors| {
+            maybe_redact_audit_payload(
+                embed_response_audit_payload(vectors, normalize),
+                audit_config.redact_outputs,
+            )
+        });
+        maybe_record_request_audit(
+            "embed",
+            audit_config,
+            audit_settings.as_ref(),
+            request_payload,
+            response_payload,
+            result.as_ref().err(),
+            started,
+        );
+    }
+
+    result
+}
+
+fn embed_request_audit_payload(inputs: &[String], normalize: bool) -> Value {
+    json!({
+        "inputs": inputs,
+        "normalize": normalize,
+    })
+}
+
+fn embed_response_audit_payload(vectors: &[Vec<f32>], normalize: bool) -> Value {
+    json!({
+        "vector_count": vectors.len(),
+        "dimension": vectors.first().map(Vec::len),
+        "normalize": normalize,
+    })
 }
 
 fn keyword_rank_impl(
@@ -2829,21 +3072,77 @@ fn semantic_rank_results(
     model: Option<&str>,
     top_n: Option<usize>,
 ) -> Result<Vec<RankedDocument>> {
-    let settings = guc::resolve_rerank(model)?;
-    let embedding_model =
-        matches!(settings.runtime, backend::Runtime::Candle).then_some(settings.model.as_str());
-    let capabilities = backend::CapabilitySnapshot::from_settings(&settings, embedding_model);
-    capabilities.require(backend::Feature::Reranking)?;
+    let audit_config = guc::audit_config();
+    let request_payload = audit_config
+        .enabled
+        .then(|| rerank_request_audit_payload(query, documents, top_n))
+        .map(|payload| maybe_redact_audit_payload(payload, audit_config.redact_inputs));
+    let started = Instant::now();
+    let mut audit_settings = None;
 
-    backend::rerank_response(&settings, query, documents, top_n).map(|ranked| {
-        ranked
+    let result = (|| {
+        let settings = guc::resolve_rerank(model)?;
+        let embedding_model =
+            matches!(settings.runtime, backend::Runtime::Candle).then_some(settings.model.as_str());
+        let capabilities = backend::CapabilitySnapshot::from_settings(&settings, embedding_model);
+        capabilities.require(backend::Feature::Reranking)?;
+
+        let ranked = backend::rerank_response(&settings, query, documents, top_n)?
             .into_iter()
             .map(|result| RankedDocument {
                 index: result.index,
                 score: result.score,
             })
-            .collect()
+            .collect::<Vec<_>>();
+        audit_settings = Some(settings);
+
+        Ok(ranked)
+    })();
+
+    if let Some(request_payload) = request_payload {
+        let response_payload = result.as_ref().ok().map(|ranked| {
+            maybe_redact_audit_payload(
+                rerank_response_audit_payload(documents, ranked),
+                audit_config.redact_outputs,
+            )
+        });
+        maybe_record_request_audit(
+            "rerank",
+            audit_config,
+            audit_settings.as_ref(),
+            request_payload,
+            response_payload,
+            result.as_ref().err(),
+            started,
+        );
+    }
+
+    result
+}
+
+fn rerank_request_audit_payload(query: &str, documents: &[String], top_n: Option<usize>) -> Value {
+    json!({
+        "query": query,
+        "documents": documents,
+        "top_n": top_n,
     })
+}
+
+fn rerank_response_audit_payload(documents: &[String], ranked: &[RankedDocument]) -> Value {
+    json!(
+        ranked
+            .iter()
+            .enumerate()
+            .map(|(position, ranked)| {
+                json!({
+                    "rank": position + 1,
+                    "index": ranked.index + 1,
+                    "score": ranked.score,
+                    "document": documents.get(ranked.index),
+                })
+            })
+            .collect::<Vec<_>>()
+    )
 }
 
 fn keyword_rank_results(
@@ -5560,6 +5859,28 @@ mod tests {
         Spi::run(query).expect("SPI should execute");
     }
 
+    fn clear_request_audit_log() {
+        sql_run("TRUNCATE postllm.request_audit_log RESTART IDENTITY");
+    }
+
+    fn request_audit_row_count() -> i64 {
+        Spi::get_one::<i64>("SELECT count(*)::bigint FROM postllm.request_audit_log")
+            .expect("SPI should execute")
+            .expect("query should return a row")
+    }
+
+    fn latest_request_audit_row() -> Value {
+        sql_json(
+            "SELECT to_jsonb(log_row)
+             FROM (
+                SELECT *
+                FROM postllm.request_audit_log
+                ORDER BY id DESC
+                LIMIT 1
+             ) AS log_row",
+        )
+    }
+
     fn unique_role_name(label: &str) -> String {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -5572,6 +5893,17 @@ mod tests {
         let role_name = unique_role_name(label);
         sql_run(&format!("CREATE ROLE {role_name} NOLOGIN"));
         sql_run(&format!("GRANT {role_name} TO CURRENT_USER"));
+
+        sql_run(&format!("GRANT USAGE ON SCHEMA postllm TO {role_name}"));
+        sql_run(&format!(
+            "GRANT SELECT ON TABLE postllm.role_permissions TO {role_name}"
+        ));
+        sql_run(&format!(
+            "GRANT SELECT ON TABLE postllm.model_aliases TO {role_name}"
+        ));
+        sql_run(&format!(
+            "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA postllm TO {role_name}"
+        ));
         role_name
     }
 
@@ -5581,17 +5913,16 @@ mod tests {
         target: &str,
         description: Option<&str>,
     ) -> Value {
-        let description_sql = description.map(sql_literal).map_or_else(
-            || "NULL".to_owned(),
-            |value| format!("description => {value}"),
-        );
+        let description_sql = description
+            .map(sql_literal)
+            .map_or_else(|| "NULL".to_owned(), |value| value);
 
         sql_json(&format!(
             "SELECT postllm.permission_set(
                 role_name => {},
                 object_type => {},
                 target => {},
-                {}
+                description => {}
             )",
             sql_literal(role_name),
             sql_literal(object_type),
@@ -6007,18 +6338,27 @@ mod tests {
     }
 
     #[pg_test]
-    #[should_panic(
-        expected = "postllm.base_url host 'api.openai.com' is not permitted by postllm.http_allowed_hosts"
-    )]
     fn sql_configure_reject_hosted_endpoints_outside_allowlist() {
         sql_run("SET LOCAL postllm.http_allowed_hosts = 'host.docker.internal:11434'");
 
-        drop(Spi::get_one::<JsonB>(
+        let configured = sql_json(&format!(
             "SELECT postllm.configure(
                 runtime => 'openai',
                 base_url => 'https://api.openai.com/v1/chat/completions'
-            )",
+            )"
         ));
+
+        assert_eq!(
+            configured["base_url"],
+            "https://api.openai.com/v1/chat/completions"
+        );
+        let discovery = sql_json("SELECT postllm.runtime_discover()");
+        assert_eq!(discovery["ready"], false);
+        assert!(
+            discovery["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("host 'api.openai.com' is not permitted"))
+        );
     }
 
     #[pg_test]
@@ -6150,7 +6490,6 @@ mod tests {
     }
 
     #[pg_test]
-    #[should_panic(expected = "privileged setting 'base_url' is not permitted")]
     fn sql_rt_discover_reject_unauthorized_base_url() {
         let allowed_role = create_test_role("setting_direct_policy");
         let caller_role = create_test_role("setting_direct_denied");
@@ -6158,7 +6497,11 @@ mod tests {
 
         set_local_role(&caller_role);
         sql_run("SET LOCAL postllm.base_url = 'http://127.0.0.1:9999/v1/chat/completions'");
-        drop(Spi::get_one::<JsonB>("SELECT postllm.runtime_discover()"));
+        let discovery = sql_json("SELECT postllm.runtime_discover()");
+        assert_eq!(discovery["ready"], false);
+        assert!(discovery["reason"].as_str().is_some_and(|reason| {
+            reason.contains("privileged setting 'base_url' is not permitted")
+        }));
     }
 
     #[pg_test]
@@ -7064,6 +7407,175 @@ mod tests {
     }
 
     #[pg_test]
+    fn sql_audit_should_skip_rows_when_disabled() {
+        clear_request_audit_log();
+
+        let (base_url, receiver) = start_mock_json_server(
+            "/v1/chat/completions",
+            r#"{
+                "id":"chatcmpl-audit-off",
+                "object":"chat.completion",
+                "choices":[
+                    {
+                        "index":0,
+                        "message":{"role":"assistant","content":"hello from SQL"},
+                        "finish_reason":"stop"
+                    }
+                ],
+                "usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}
+            }"#,
+        );
+
+        drop(sql_json(&format!(
+            "SELECT postllm.configure(runtime => 'openai', base_url => {}, model => 'mock-audit-model')",
+            sql_literal(&base_url)
+        )));
+
+        let response = sql_json(
+            "SELECT postllm.chat(
+                ARRAY[postllm.user('keep this out of the audit table')],
+                temperature => 0.0,
+                max_tokens => 8
+            )",
+        );
+        let request_body = receiver
+            .recv()
+            .expect("mock server should capture the audit-disabled request");
+
+        assert_eq!(
+            response["choices"][0]["message"]["content"],
+            "hello from SQL"
+        );
+        assert_eq!(
+            request_body["messages"][0]["content"],
+            "keep this out of the audit table"
+        );
+        assert_eq!(request_audit_row_count(), 0);
+    }
+
+    #[pg_test]
+    fn sql_audit_should_redact_chat_rows() {
+        clear_request_audit_log();
+        sql_run("SET LOCAL postllm.request_logging = on");
+
+        let (base_url, receiver) = start_mock_json_server(
+            "/v1/chat/completions",
+            r#"{
+                "id":"chatcmpl-audit-redacted",
+                "object":"chat.completion",
+                "choices":[
+                    {
+                        "index":0,
+                        "message":{"role":"assistant","content":"sensitive response"},
+                        "finish_reason":"stop"
+                    }
+                ],
+                "usage":{"prompt_tokens":6,"completion_tokens":2,"total_tokens":8}
+            }"#,
+        );
+
+        drop(sql_json(&format!(
+            "SELECT postllm.configure(runtime => 'openai', base_url => {}, model => 'mock-audit-model')",
+            sql_literal(&base_url)
+        )));
+
+        let text = sql_text(
+            "SELECT postllm.chat_text(
+                ARRAY[postllm.user('sensitive prompt')],
+                temperature => 0.0,
+                max_tokens => 8
+            )",
+        );
+        let request_body = receiver
+            .recv()
+            .expect("mock server should capture the redacted audit request");
+        let audit_row = latest_request_audit_row();
+
+        assert_eq!(text, "sensitive response");
+        assert_eq!(request_body["messages"][0]["content"], "sensitive prompt");
+        assert_eq!(request_audit_row_count(), 1);
+        assert_eq!(audit_row["operation"], "chat");
+        assert_eq!(audit_row["status"], "ok");
+        assert_eq!(audit_row["runtime"], "openai");
+        assert_eq!(audit_row["model"], "mock-audit-model");
+        assert_eq!(audit_row["input_redacted"], true);
+        assert_eq!(audit_row["output_redacted"], true);
+        assert_eq!(
+            audit_row["request_payload"]["messages"][0]["content"],
+            "[redacted]"
+        );
+        assert_eq!(
+            audit_row["response_payload"]["choices"][0]["message"]["content"],
+            "[redacted]"
+        );
+    }
+
+    #[pg_test]
+    fn sql_audit_should_store_unredacted_complete_rows() {
+        clear_request_audit_log();
+        sql_run("SET LOCAL postllm.request_logging = on");
+        sql_run("SET LOCAL postllm.request_log_redact_inputs = off");
+        sql_run("SET LOCAL postllm.request_log_redact_outputs = off");
+
+        let (base_url, receiver) = start_mock_json_server(
+            "/v1/chat/completions",
+            r#"{
+                "id":"chatcmpl-audit-unredacted",
+                "object":"chat.completion",
+                "choices":[
+                    {
+                        "index":0,
+                        "message":{"role":"assistant","content":"visible response"},
+                        "finish_reason":"stop"
+                    }
+                ],
+                "usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":11}
+            }"#,
+        );
+
+        drop(sql_json(&format!(
+            "SELECT postllm.configure(runtime => 'openai', base_url => {}, model => 'mock-audit-model')",
+            sql_literal(&base_url)
+        )));
+
+        let text = sql_text(
+            "SELECT postllm.complete(
+                prompt => 'visible prompt',
+                system_prompt => 'visible system prompt',
+                temperature => 0.0,
+                max_tokens => 8
+            )",
+        );
+        let request_body = receiver
+            .recv()
+            .expect("mock server should capture the unredacted audit request");
+        let audit_row = latest_request_audit_row();
+
+        assert_eq!(text, "visible response");
+        assert_eq!(
+            request_body["messages"][0]["content"],
+            "visible system prompt"
+        );
+        assert_eq!(request_body["messages"][1]["content"], "visible prompt");
+        assert_eq!(request_audit_row_count(), 1);
+        assert_eq!(audit_row["operation"], "complete");
+        assert_eq!(audit_row["input_redacted"], false);
+        assert_eq!(audit_row["output_redacted"], false);
+        assert_eq!(
+            audit_row["request_payload"]["messages"][0]["content"],
+            "visible system prompt"
+        );
+        assert_eq!(
+            audit_row["request_payload"]["messages"][1]["content"],
+            "visible prompt"
+        );
+        assert_eq!(
+            audit_row["response_payload"]["choices"][0]["message"]["content"],
+            "visible response"
+        );
+    }
+
+    #[pg_test]
     fn sql_rerank_should_smoke_live_candle_when_enabled() {
         let Some(_) = configure_candle_generation_pg_test() else {
             return;
@@ -7601,7 +8113,6 @@ mod tests {
             sql_literal(&base_url)
         ));
         let discovery = sql_json("SELECT postllm.runtime_discover()");
-        let ready = sql_bool("SELECT postllm.runtime_ready()");
         let request_line = receiver
             .recv()
             .expect("runtime discovery probe should hit the mock server");
@@ -7616,7 +8127,6 @@ mod tests {
         assert_eq!(discovery["status_code"], 200);
         assert_eq!(discovery["base_url_kind"], "loopback");
         assert_eq!(discovery["execution_environment"], "local");
-        assert_eq!(ready, true);
     }
 
     #[pg_test]

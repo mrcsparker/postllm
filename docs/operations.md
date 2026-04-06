@@ -38,17 +38,43 @@ For local embeddings, environment variables in the container image include:
 
 ## End-to-end checks
 
-Dockerized llama-server:
+Run the Docker smoke suites from the repository root:
 
 ```bash
 ./scripts/e2e_llama.sh
-```
-
-Dockerized Candle:
-
-```bash
 ./scripts/e2e_candle.sh
 ```
+
+`e2e_llama.sh` validates the hosted OpenAI-compatible lane against the bundled `llama-server` container. A passing run proves that:
+
+- the extension can be built and installed into the PostgreSQL Docker image,
+- PostgreSQL starts cleanly with `postllm` enabled,
+- `postllm.runtime_discover()` and `postllm.runtime_ready()` both succeed for the hosted runtime, and
+- `postllm.complete(...)` returns a non-empty response from the local `llama-server`.
+
+`e2e_candle.sh` validates the local Candle lane. A passing run proves that:
+
+- local embedding and batch embedding calls succeed,
+- local model inspection, install, prewarm, and offline configuration work,
+- `postllm.rerank(...)` and `postllm.hybrid_rank(...)` keep the relevant document on top,
+- `postllm.chat(...)` and `postllm.complete(...)` return usable generation output, and
+- `postllm.ingest_document(...)` is idempotent across repeated runs.
+
+Common script controls:
+
+```bash
+POSTLLM_PG_PORT=5541 ./scripts/e2e_llama.sh
+POSTLLM_PG_PORT=5542 ./scripts/e2e_candle.sh
+POSTLLM_E2E_KEEP=1 ./scripts/e2e_candle.sh
+```
+
+- `POSTLLM_PG_PORT` overrides the published PostgreSQL port for the Docker stack.
+- `POSTLLM_E2E_KEEP=1` keeps the Docker services running after the script exits so you can inspect logs or connect with `psql`.
+
+Success is reported explicitly at the end of each run:
+
+- `llama-server end-to-end smoke test passed.`
+- `Candle end-to-end smoke test passed.`
 
 ## Quality gates
 
@@ -77,5 +103,5 @@ Treat this as part of your architecture:
 
 - keep latency-sensitive SQL paths explicit.
 - gate runtime switches with permissions and allowlists.
+- use `postllm.request_audit_log` only when you explicitly need audit visibility, and prefer redacted payload settings for routine production debugging.
 - use `runtime_discover()` and `runtime_ready()` in startup scripts.
-

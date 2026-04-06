@@ -23,6 +23,9 @@
 - `postllm.candle_device`
 - `postllm.candle_max_input_tokens`
 - `postllm.candle_max_concurrency`
+- `postllm.request_logging`
+- `postllm.request_log_redact_inputs`
+- `postllm.request_log_redact_outputs`
 
 Use `postllm.configure(...)` for session intent and `SET LOCAL`/`ALTER SYSTEM` for environment-level policy.
 
@@ -120,6 +123,34 @@ ALTER SYSTEM SET postllm.http_allowed_providers = 'openai,ollama';
 `postllm.http_allowed_hosts` accepts `host`, `host:port`, `*.suffix`, and empty (unrestricted).  
 `postllm.http_allowed_providers` accepts `openai`, `ollama`, `openai-compatible`, or `*`.
 
+## Request audit logging
+
+Operators can persist an audit trail for request execution with:
+
+- `postllm.request_logging`
+- `postllm.request_log_redact_inputs`
+- `postllm.request_log_redact_outputs`
+
+When logging is enabled, `postllm` writes one row per chat, completion, streaming, embedding, or rerank request into `postllm.request_audit_log`.
+
+Recommended safe default:
+
+```sql
+SET LOCAL postllm.request_logging = on;
+SET LOCAL postllm.request_log_redact_inputs = on;
+SET LOCAL postllm.request_log_redact_outputs = on;
+```
+
+If an operator explicitly needs full prompt and response capture for a short-lived debugging session:
+
+```sql
+SET LOCAL postllm.request_logging = on;
+SET LOCAL postllm.request_log_redact_inputs = off;
+SET LOCAL postllm.request_log_redact_outputs = off;
+```
+
+Audit rows include role, backend PID, runtime, model, duration, request payload, response payload, and any error text. The audit table is intended for operator review rather than routine application queries.
+
 ## Model aliases
 
 Aliases are lane-aware and resolve automatically during generation, embeddings, discovery, and lifecycle operations.
@@ -148,4 +179,3 @@ Use:
 - `postllm.runtime_ready()`
 
 to verify what is active and what is currently supported in that runtime/model combination.
-
