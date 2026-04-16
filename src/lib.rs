@@ -2676,14 +2676,13 @@ fn embed_many_impl(
     execution::ExecutionContext::new("embed", || embed_request_audit_payload(inputs, normalize))
         .run_embedding(
             model,
-            |settings| {
-                let validated_inputs = inputs
+            || {
+                inputs
                     .iter()
                     .map(|input| require_non_blank("input", input).map(str::to_owned))
-                    .collect::<Result<Vec<_>>>()?;
-
-                candle::embed(settings, &validated_inputs, normalize)
+                    .collect::<Result<Vec<_>>>()
             },
+            |settings, validated_inputs| candle::embed(settings, &validated_inputs, normalize),
             |vectors| embed_response_audit_payload(vectors, normalize),
         )
 }
@@ -7431,6 +7430,156 @@ mod tests {
     }
 
     #[pg_test]
+    fn sql_audit_should_redact_chat_stream_rows() {
+        clear_request_audit_log();
+        sql_run("SET LOCAL postllm.request_logging = on");
+
+        let (base_url, receiver) = start_mock_stream_server(concat!(
+            "data: {\"id\":\"chatcmpl-audit-stream\",\"object\":\"chat.completion.chunk\",\"model\":\"mock-stream-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-audit-stream\",\"object\":\"chat.completion.chunk\",\"model\":\"mock-stream-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hel\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-audit-stream\",\"object\":\"chat.completion.chunk\",\"model\":\"mock-stream-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        ));
+
+        drop(sql_json(&format!(
+            "SELECT postllm.configure(runtime => 'openai', base_url => {}, model => 'mock-stream-model')",
+            sql_literal(&base_url)
+        )));
+
+        let rows = sql_json(
+            "SELECT jsonb_agg(to_jsonb(chunk) ORDER BY index)
+             FROM postllm.chat_stream(
+                ARRAY[postllm.user('stream this sensitive prompt')],
+                temperature => 0.0,
+                max_tokens => 8
+             ) AS chunk",
+        );
+        let request_body = receiver
+            .recv()
+            .expect("mock server should capture the streamed audit request");
+        let audit_row = latest_request_audit_row();
+
+        assert_eq!(
+            rows.as_array()
+                .expect("chat_stream rows should aggregate to a JSON array")
+                .len(),
+            3
+        );
+        assert_eq!(request_body["stream"], true);
+        assert_eq!(
+            request_body["messages"][0]["content"],
+            "stream this sensitive prompt"
+        );
+        assert_eq!(request_audit_row_count(), 1);
+        assert_eq!(audit_row["operation"], "chat_stream");
+        assert_eq!(audit_row["status"], "ok");
+        assert_eq!(audit_row["runtime"], "openai");
+        assert_eq!(audit_row["model"], "mock-stream-model");
+        assert_eq!(audit_row["input_redacted"], true);
+        assert_eq!(audit_row["output_redacted"], true);
+        assert_eq!(
+            audit_row["request_payload"]["messages"][0]["content"],
+            "[redacted]"
+        );
+        assert_eq!(audit_row["response_payload"]["event_count"], 3);
+        assert_eq!(audit_row["response_payload"]["text"], "[redacted]");
+    }
+
+    #[pg_test]
+    fn sql_audit_should_redact_rerank_rows() {
+        clear_request_audit_log();
+        sql_run("SET LOCAL postllm.request_logging = on");
+
+        let (base_url, receiver) = start_mock_json_server(
+            "/v1/rerank",
+            r#"{"results":[{"index":1,"relevance_score":0.98},{"index":0,"relevance_score":0.12}]}"#,
+        );
+
+        drop(sql_json(&format!(
+            "SELECT postllm.configure(runtime => 'openai', base_url => {}, model => 'mock-reranker')",
+            sql_literal(&base_url)
+        )));
+
+        let rows = sql_json(
+            r"SELECT jsonb_agg(to_jsonb(ranked) ORDER BY rank)
+            FROM postllm.rerank(
+                'What controls table bloat?',
+                ARRAY[
+                    'Bananas are yellow.',
+                    'Autovacuum removes dead tuples.'
+                ],
+                top_n => 1
+            ) AS ranked",
+        );
+        let request_body = receiver
+            .recv()
+            .expect("mock server should capture the rerank audit request");
+        let audit_row = latest_request_audit_row();
+
+        assert_eq!(
+            rows,
+            json!([{
+                "rank": 1,
+                "index": 2,
+                "document": "Autovacuum removes dead tuples.",
+                "score": 0.98,
+            }])
+        );
+        assert_eq!(request_body["query"], "What controls table bloat?");
+        assert_eq!(request_audit_row_count(), 1);
+        assert_eq!(audit_row["operation"], "rerank");
+        assert_eq!(audit_row["status"], "ok");
+        assert_eq!(audit_row["runtime"], "openai");
+        assert_eq!(audit_row["model"], "mock-reranker");
+        assert_eq!(audit_row["input_redacted"], true);
+        assert_eq!(audit_row["output_redacted"], true);
+        assert_eq!(audit_row["request_payload"]["query"], "[redacted]");
+        assert_eq!(audit_row["request_payload"]["documents"], "[redacted]");
+        assert_eq!(audit_row["request_payload"]["top_n"], 1);
+        assert_eq!(audit_row["response_payload"][0]["rank"], 1);
+        assert_eq!(audit_row["response_payload"][0]["index"], 2);
+        assert_eq!(audit_row["response_payload"][0]["score"].as_f64(), Some(0.98));
+        assert_eq!(audit_row["response_payload"][0]["document"], "[redacted]");
+    }
+
+    #[pg_test]
+    fn sql_audit_should_record_embed_error_rows() {
+        clear_request_audit_log();
+        sql_run("SET LOCAL postllm.request_logging = on");
+
+        let cache_dir = fresh_test_cache_dir("audit-embed-miss");
+        drop(sql_json(&format!(
+            "SELECT postllm.configure(candle_cache_dir => {}, candle_offline => true)",
+            sql_literal(&cache_dir)
+        )));
+
+        let error = super::embed_many_impl(&["offline test".to_owned()], None, true)
+            .expect_err("offline embed request should fail");
+        let audit_row = latest_request_audit_row();
+
+        assert!(
+            error
+                .to_string()
+                .contains("offline mode is enabled and model")
+        );
+        assert_eq!(request_audit_row_count(), 1);
+        assert_eq!(audit_row["operation"], "embed");
+        assert_eq!(audit_row["status"], "error");
+        assert_eq!(audit_row["runtime"], "candle");
+        assert_eq!(audit_row["model"], crate::guc::DEFAULT_EMBEDDING_MODEL);
+        assert_eq!(audit_row["input_redacted"], true);
+        assert_eq!(audit_row["output_redacted"], true);
+        assert_eq!(audit_row["request_payload"]["inputs"], "[redacted]");
+        assert_eq!(audit_row["request_payload"]["normalize"], true);
+        assert!(audit_row["response_payload"].is_null());
+        assert!(
+            audit_row["error_message"]
+                .as_str()
+                .is_some_and(|message| message.contains("offline mode is enabled and model"))
+        );
+    }
+
+    #[pg_test]
     fn sql_rerank_should_smoke_live_candle_when_enabled() {
         let Some(_) = configure_candle_generation_pg_test() else {
             return;
@@ -8705,6 +8854,16 @@ mod tests {
     fn sql_embed_many_should_reject_empty_arrays() {
         drop(Spi::get_one::<JsonB>(
             "SELECT postllm.embed_many(ARRAY[]::text[])",
+        ));
+    }
+
+    #[pg_test]
+    #[should_panic(expected = "argument 'input' must not be empty or whitespace-only")]
+    fn sql_embed_many_should_validate_blank_inputs_before_settings() {
+        sql_run("SET LOCAL postllm.embedding_model = ''");
+
+        drop(Spi::get_one::<JsonB>(
+            "SELECT postllm.embed_many(ARRAY['   '])",
         ));
     }
 }

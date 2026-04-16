@@ -91,25 +91,39 @@ impl ExecutionContext {
     }
 
     /// Resolves, validates, and executes one embedding request.
-    pub(crate) fn run_embedding<T>(
+    pub(crate) fn run_embedding<T, Prepared>(
         self,
         model_override: Option<&str>,
-        execute: impl FnOnce(&Settings) -> Result<T>,
+        prepare_request: impl FnOnce() -> Result<Prepared>,
+        execute: impl FnOnce(&Settings, Prepared) -> Result<T>,
         response_payload: impl FnOnce(&T) -> Value,
     ) -> Result<T> {
-        self.run_with_settings(
-            || {
-                let settings = guc::resolve_embedding_settings(model_override)?;
-                let capabilities = backend::CapabilitySnapshot::from_settings(
-                    &settings,
-                    Some(settings.model.as_str()),
-                );
-                capabilities.require(backend::Feature::Embeddings)?;
-                Ok(settings)
-            },
-            execute,
-            response_payload,
-        )
+        let mut settings = None;
+        let result = (|| {
+            let prepared = prepare_request()?;
+            let resolved = guc::resolve_embedding_settings(model_override)?;
+            let capabilities = backend::CapabilitySnapshot::from_settings(
+                &resolved,
+                Some(resolved.model.as_str()),
+            );
+            capabilities.require(backend::Feature::Embeddings)?;
+            settings = Some(resolved);
+
+            execute(
+                settings
+                    .as_ref()
+                    .expect("resolved embedding settings should exist"),
+                prepared,
+            )
+        })();
+
+        self.finish(
+            settings.as_ref(),
+            &result,
+            result.as_ref().ok().map(response_payload),
+        );
+
+        result
     }
 
     /// Resolves, validates, and executes one reranking request.

@@ -13,7 +13,7 @@ use serde_json::{Map, Value};
 use std::time::Duration;
 
 const REDACTED_VALUE: &str = "[redacted]";
-const REDACTABLE_FIELDS: [&str; 10] = [
+const REDACTABLE_FIELDS: [&str; 11] = [
     "arguments",
     "completion",
     "content",
@@ -24,6 +24,7 @@ const REDACTABLE_FIELDS: [&str; 10] = [
     "inputs",
     "prompt",
     "query",
+    "text",
 ];
 
 /// Audit-log controls resolved from session GUCs.
@@ -250,6 +251,7 @@ mod tests {
             "documents": ["alpha", "beta"],
             "nested": {
                 "delta": "stream chunk",
+                "text": "streamed text",
                 "safe": true
             }
         });
@@ -264,6 +266,7 @@ mod tests {
         assert_eq!(redacted["query"], REDACTED_VALUE);
         assert_eq!(redacted["documents"], REDACTED_VALUE);
         assert_eq!(redacted["nested"]["delta"], REDACTED_VALUE);
+        assert_eq!(redacted["nested"]["text"], REDACTED_VALUE);
         assert_eq!(redacted["nested"]["safe"], true);
     }
 }
