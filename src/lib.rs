@@ -7538,8 +7538,52 @@ mod tests {
         assert_eq!(audit_row["request_payload"]["top_n"], 1);
         assert_eq!(audit_row["response_payload"][0]["rank"], 1);
         assert_eq!(audit_row["response_payload"][0]["index"], 2);
-        assert_eq!(audit_row["response_payload"][0]["score"].as_f64(), Some(0.98));
+        assert_eq!(
+            audit_row["response_payload"][0]["score"].as_f64(),
+            Some(0.98)
+        );
         assert_eq!(audit_row["response_payload"][0]["document"], "[redacted]");
+    }
+
+    #[pg_test]
+    fn sql_audit_should_record_embed_success_rows() {
+        clear_request_audit_log();
+        sql_run("SET LOCAL postllm.request_logging = on");
+
+        drop(sql_json(&format!(
+            "SELECT postllm.configure(runtime => 'candle', embedding_model => {})",
+            sql_literal(crate::guc::DEFAULT_EMBEDDING_MODEL)
+        )));
+
+        let vectors = super::execution::ExecutionContext::new("embed", || {
+            super::embed_request_audit_payload(&["offline-safe input".to_owned()], true)
+        })
+        .run_embedding(
+            None,
+            || Ok::<Vec<String>, crate::error::Error>(vec!["offline-safe input".to_owned()]),
+            |_settings, validated_inputs| {
+                assert_eq!(validated_inputs, vec!["offline-safe input".to_owned()]);
+                Ok::<Vec<Vec<f32>>, crate::error::Error>(vec![vec![0.1, 0.2, 0.3]])
+            },
+            |vectors| super::embed_response_audit_payload(vectors, true),
+        )
+        .expect("embed audit success path should complete");
+        let audit_row = latest_request_audit_row();
+
+        assert_eq!(vectors, vec![vec![0.1, 0.2, 0.3]]);
+        assert_eq!(request_audit_row_count(), 1);
+        assert_eq!(audit_row["operation"], "embed");
+        assert_eq!(audit_row["status"], "ok");
+        assert_eq!(audit_row["runtime"], "candle");
+        assert_eq!(audit_row["model"], crate::guc::DEFAULT_EMBEDDING_MODEL);
+        assert_eq!(audit_row["input_redacted"], true);
+        assert_eq!(audit_row["output_redacted"], true);
+        assert_eq!(audit_row["request_payload"]["inputs"], "[redacted]");
+        assert_eq!(audit_row["request_payload"]["normalize"], true);
+        assert_eq!(audit_row["response_payload"]["vector_count"], 1);
+        assert_eq!(audit_row["response_payload"]["dimension"], 3);
+        assert_eq!(audit_row["response_payload"]["normalize"], true);
+        assert!(audit_row["error_message"].is_null());
     }
 
     #[pg_test]
