@@ -954,6 +954,43 @@ pub(crate) fn snapshot() -> Value {
     })
 }
 
+/// Returns a durable async-job settings snapshot that can be replayed in a worker session.
+pub(crate) fn async_job_settings_snapshot() -> Result<Value> {
+    if api_key_source() == "direct" {
+        return Err(Error::Config(
+            "async jobs do not support direct postllm.api_key session secrets; fix: store the credential with postllm.secret_set(...) and switch the session to postllm.configure(api_key_secret => '...') before submitting async work"
+                .to_owned(),
+        ));
+    }
+
+    Ok(json!({
+        "runtime": string_setting(&POSTLLM_RUNTIME),
+        "base_url": string_setting(&POSTLLM_BASE_URL),
+        "model": string_setting(&POSTLLM_MODEL),
+        "embedding_model": string_setting(&POSTLLM_EMBEDDING_MODEL),
+        "api_key_secret": string_setting(&POSTLLM_API_KEY_SECRET),
+        "timeout_ms": POSTLLM_TIMEOUT_MS.get(),
+        "max_retries": POSTLLM_MAX_RETRIES.get(),
+        "retry_backoff_ms": POSTLLM_RETRY_BACKOFF_MS.get(),
+        "request_max_concurrency": POSTLLM_REQUEST_MAX_CONCURRENCY.get(),
+        "request_token_budget": POSTLLM_REQUEST_TOKEN_BUDGET.get(),
+        "request_runtime_budget_ms": POSTLLM_REQUEST_RUNTIME_BUDGET_MS.get(),
+        "request_spend_budget_microusd": POSTLLM_REQUEST_SPEND_BUDGET_MICROUSD.get(),
+        "output_token_price_microusd_per_1k": POSTLLM_OUTPUT_TOKEN_PRICE_MICROUSD_PER_1K.get(),
+        "candle_cache_dir": string_setting(&POSTLLM_CANDLE_CACHE_DIR),
+        "candle_offline": POSTLLM_CANDLE_OFFLINE.get(),
+        "candle_device": string_setting(&POSTLLM_CANDLE_DEVICE),
+        "candle_max_input_tokens": POSTLLM_CANDLE_MAX_INPUT_TOKENS.get(),
+        "candle_max_concurrency": POSTLLM_CANDLE_MAX_CONCURRENCY.get(),
+    }))
+}
+
+/// Applies one stored async-job settings snapshot to the current backend session.
+pub(crate) fn apply_async_job_settings_snapshot(snapshot: &Value) -> Result<Value> {
+    let overrides = SessionOverrides::from_profile_json(snapshot)?;
+    apply_profile_overrides(&overrides)
+}
+
 /// Returns a JSON capability snapshot based on the current GUC state.
 #[must_use]
 pub(crate) fn capabilities_snapshot() -> Value {

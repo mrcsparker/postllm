@@ -12,6 +12,7 @@ pub(crate) mod execution;
 pub(crate) mod guc;
 pub(crate) mod http_policy;
 pub(crate) mod interrupt;
+pub(crate) mod jobs;
 pub(crate) mod operator_policy;
 pub(crate) mod permissions;
 pub(crate) mod secrets;
@@ -32,6 +33,12 @@ use std::path::Path;
 #[pgrx::pg_guard]
 pub extern "C-unwind" fn _PG_init() {
     guc::register();
+}
+
+/// Runs one dynamically launched async-job worker.
+#[pgrx::pg_guard]
+pub extern "C-unwind" fn postllm_async_job_worker_main(_arg: pgrx::pg_sys::Datum) {
+    jobs::worker_main();
 }
 
 pgrx::extension_sql!(
@@ -118,6 +125,36 @@ pgrx::extension_sql!(
 
     COMMENT ON TABLE postllm.request_audit_log IS
         'Opt-in audit trail for postllm request execution, including optional redaction of request and response payload fields.';
+
+    CREATE TABLE postllm.async_jobs (
+        id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        submitted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        started_at timestamptz,
+        finished_at timestamptz,
+        updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        submitted_by text NOT NULL,
+        kind text NOT NULL,
+        status text NOT NULL DEFAULT 'queued',
+        worker_pid integer,
+        request_payload jsonb NOT NULL,
+        result_payload jsonb,
+        settings_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb,
+        error_message text,
+        CHECK (kind IN ('chat', 'complete', 'embed', 'rerank')),
+        CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
+        CHECK (jsonb_typeof(request_payload) = 'object'),
+        CHECK (jsonb_typeof(settings_snapshot) = 'object')
+    );
+
+    CREATE INDEX postllm_async_jobs_status_submitted_at_idx
+        ON postllm.async_jobs (status, submitted_at DESC);
+    CREATE INDEX postllm_async_jobs_submitted_by_submitted_at_idx
+        ON postllm.async_jobs (submitted_by, submitted_at DESC);
+
+    COMMENT ON TABLE postllm.async_jobs IS
+        'Durable async postllm jobs submitted for background execution, polling, result fetch, and cancellation.';
+    COMMENT ON COLUMN postllm.async_jobs.settings_snapshot IS
+        'Stored postllm session settings replayed into the async worker before the job runs.';
 
     CREATE VIEW postllm.request_metrics AS
     SELECT
@@ -266,7 +303,7 @@ pgrx::extension_sql!(
 
 #[pgrx::pg_schema]
 mod postllm {
-    use crate::api::{config, inference, messages, ops, retrieval};
+    use crate::api::{config, inference, jobs, messages, ops, retrieval};
     use pgrx::iter::TableIterator;
     use pgrx::{
         Aggregate, AggregateName, JsonB, ParallelOption, default, pg_aggregate, pg_extern,
@@ -295,6 +332,38 @@ mod postllm {
     #[pg_extern]
     fn runtime_ready() -> bool {
         config::runtime_ready()
+    }
+
+    /// Submits one durable async job and returns the queued job row.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
+    )]
+    #[pg_extern(security_definer)]
+    #[search_path(postllm, pg_catalog)]
+    fn job_submit(kind: &str, request: JsonB) -> JsonB {
+        jobs::submit(kind, request)
+    }
+
+    /// Returns the latest persisted state for one async job.
+    #[pg_extern(security_definer)]
+    #[search_path(postllm, pg_catalog)]
+    fn job_poll(job_id: i64) -> JsonB {
+        jobs::poll(job_id)
+    }
+
+    /// Returns the completed result payload for one succeeded async job.
+    #[pg_extern(security_definer)]
+    #[search_path(postllm, pg_catalog)]
+    fn job_result(job_id: i64) -> JsonB {
+        jobs::result(job_id)
+    }
+
+    /// Cancels one queued or running async job and returns the updated job row.
+    #[pg_extern(security_definer)]
+    #[search_path(postllm, pg_catalog)]
+    fn job_cancel(job_id: i64) -> JsonB {
+        jobs::cancel(job_id)
     }
 
     #[doc(hidden)]
@@ -329,6 +398,56 @@ mod postllm {
             error_message,
         ) {
             Ok(()) => true,
+            Err(error) => pgrx::error!("{error}"),
+        }
+    }
+
+    #[doc(hidden)]
+    #[pg_extern(name = "_async_job_claim", security_definer)]
+    #[search_path(postllm, pg_catalog)]
+    fn async_job_claim(job_id: i64) -> Option<JsonB> {
+        match crate::jobs::worker_claim(job_id) {
+            Ok(row) => row.map(JsonB),
+            Err(error) => pgrx::error!("{error}"),
+        }
+    }
+
+    #[doc(hidden)]
+    #[pg_extern(name = "_async_job_finish", security_definer)]
+    #[search_path(postllm, pg_catalog)]
+    fn async_job_finish(
+        job_id: i64,
+        status: &str,
+        result_payload: default!(Option<JsonB>, "NULL"),
+        error_message: default!(Option<&str>, "NULL"),
+    ) -> bool {
+        match crate::jobs::worker_finish(
+            job_id,
+            status,
+            result_payload.as_ref().map(|payload| &payload.0),
+            error_message,
+        ) {
+            Ok(updated) => updated,
+            Err(error) => pgrx::error!("{error}"),
+        }
+    }
+
+    #[doc(hidden)]
+    #[pg_extern(name = "_async_job_mark_failed", security_definer)]
+    #[search_path(postllm, pg_catalog)]
+    fn async_job_mark_failed(job_id: i64, error_message: &str) -> bool {
+        match crate::jobs::worker_mark_failed(job_id, error_message) {
+            Ok(updated) => updated,
+            Err(error) => pgrx::error!("{error}"),
+        }
+    }
+
+    #[doc(hidden)]
+    #[pg_extern(name = "_async_job_run", security_definer)]
+    #[search_path(postllm, pg_catalog)]
+    fn async_job_run(job_id: i64) -> bool {
+        match crate::jobs::run_spawned_job(job_id) {
+            Ok(updated) => updated,
             Err(error) => pgrx::error!("{error}"),
         }
     }
@@ -5891,8 +6010,61 @@ mod tests {
         Spi::run(query).expect("SPI should execute");
     }
 
+    fn psql_json(query: &str) -> Value {
+        let socket_dir = sql_text("SHOW unix_socket_directories")
+            .split(',')
+            .next()
+            .expect("socket directory should be available")
+            .trim()
+            .to_owned();
+        let port = sql_text("SHOW port");
+        let database = sql_text("SELECT current_database()::text");
+        let user = sql_text("SELECT session_user::text");
+        let output = Command::new(pg_test_psql_path())
+            .args([
+                "-X",
+                "-q",
+                "-t",
+                "-A",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-h",
+                &socket_dir,
+                "-p",
+                &port,
+                "-U",
+                &user,
+                "-d",
+                &database,
+                "-c",
+                query,
+            ])
+            .output()
+            .expect("psql should run the async-job query");
+
+        assert!(
+            output.status.success(),
+            "psql query failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let stdout = String::from_utf8(output.stdout).expect("psql stdout should be valid UTF-8");
+        let json_line = stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .last()
+            .expect("psql should emit one JSON line");
+
+        serde_json::from_str(json_line).expect("psql should emit valid JSON")
+    }
+
     fn clear_request_audit_log() {
         sql_run("TRUNCATE postllm.request_audit_log RESTART IDENTITY");
+    }
+
+    fn clear_async_jobs() {
+        sql_run("TRUNCATE postllm.async_jobs RESTART IDENTITY");
     }
 
     fn request_audit_row_count() -> i64 {
@@ -5911,6 +6083,30 @@ mod tests {
                 LIMIT 1
              ) AS log_row",
         )
+    }
+
+    fn wait_for_async_job_status(job_id: i64, expected: &[&str], timeout_ms: u64) -> Value {
+        let started = std::time::Instant::now();
+
+        loop {
+            let row = sql_json(&format!("SELECT postllm.job_poll({job_id})"));
+            let status = row["status"]
+                .as_str()
+                .expect("async job rows should include a string status");
+
+            if expected.contains(&status) {
+                return row;
+            }
+
+            if started.elapsed() >= Duration::from_millis(timeout_ms) {
+                panic!(
+                    "async job {job_id} did not reach one of {:?} within {timeout_ms}ms; last row: {row}",
+                    expected
+                );
+            }
+
+            thread::sleep(Duration::from_millis(25));
+        }
     }
 
     fn insert_request_audit_metric_row(
@@ -6145,6 +6341,41 @@ mod tests {
         (address, receiver)
     }
 
+    fn start_delayed_mock_json_server(
+        path: &str,
+        response_body: &str,
+        response_delay: Duration,
+    ) -> (String, mpsc::Receiver<Value>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let address = format!(
+            "http://{}{}",
+            listener
+                .local_addr()
+                .expect("listener should have a local address"),
+            path
+        );
+        let (sender, receiver) = mpsc::channel();
+        let expected_path = path.to_owned();
+        let response_body = response_body.to_owned();
+
+        thread::spawn(move || {
+            let (stream, _) = listener
+                .accept()
+                .expect("server should accept one connection");
+            let request_body = read_mock_json_request_with_delay(
+                stream,
+                &expected_path,
+                &response_body,
+                response_delay,
+            );
+            sender
+                .send(request_body)
+                .expect("request body should be sent back to the test");
+        });
+
+        (address, receiver)
+    }
+
     fn start_mock_runtime_discovery_server(
         status_code: u16,
         response_body: &str,
@@ -6234,6 +6465,20 @@ mod tests {
         expected_path: &str,
         response_body: &str,
     ) -> Value {
+        read_mock_json_request_with_delay(
+            stream,
+            expected_path,
+            response_body,
+            Duration::from_millis(0),
+        )
+    }
+
+    fn read_mock_json_request_with_delay(
+        mut stream: TcpStream,
+        expected_path: &str,
+        response_body: &str,
+        response_delay: Duration,
+    ) -> Value {
         let mut reader = BufReader::new(stream.try_clone().expect("stream should clone"));
         let mut request_line = String::new();
         reader
@@ -6276,6 +6521,8 @@ mod tests {
         reader
             .read_exact(&mut body)
             .expect("request body should read");
+
+        thread::sleep(response_delay);
 
         write!(
             stream,
@@ -8544,6 +8791,135 @@ mod tests {
 
         drop(Spi::get_one::<JsonB>(
             "SELECT postllm.chat(ARRAY[postllm.user('blocked by backpressure')])",
+        ));
+    }
+
+    #[pg_test]
+    fn sql_job_should_submit_poll_and_fetch_complete_results() {
+        clear_async_jobs();
+        let (base_url, receiver) = start_mock_json_server(
+            "/v1/chat/completions",
+            r#"{
+                "id":"chatcmpl-async-complete",
+                "object":"chat.completion",
+                "choices":[
+                    {
+                        "index":0,
+                        "message":{"role":"assistant","content":"hello from async complete"},
+                        "finish_reason":"stop"
+                    }
+                ],
+                "usage":{"prompt_tokens":5,"completion_tokens":4,"total_tokens":9}
+            }"#,
+        );
+
+        let submitted = psql_json(&format!(
+            "SELECT postllm.configure(
+                runtime => 'openai',
+                base_url => {},
+                model => 'mock-async-model'
+            );
+            SELECT postllm.job_submit(
+                kind => 'complete',
+                request => jsonb_build_object(
+                    'prompt', 'Say hi from async complete',
+                    'temperature', 0.0,
+                    'max_tokens', 12
+                )
+            )",
+            sql_literal(&base_url)
+        ));
+        let job_id = submitted["id"]
+            .as_i64()
+            .expect("submitted async job should include an integer id");
+        let finished =
+            wait_for_async_job_status(job_id, &["succeeded", "failed", "cancelled"], 5_000);
+        let result = sql_json(&format!("SELECT postllm.job_result({job_id})"));
+        let request_body = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("mock server should capture the async request");
+
+        assert_eq!(submitted["kind"], "complete");
+        assert_eq!(submitted["status"], "queued");
+        assert_eq!(finished["status"], "succeeded");
+        assert_eq!(result["text"], "hello from async complete");
+        assert_eq!(
+            request_body["messages"][0]["content"],
+            "Say hi from async complete"
+        );
+        assert_eq!(request_body["temperature"], 0.0);
+        assert_eq!(request_body["max_tokens"], 12);
+    }
+
+    #[pg_test]
+    fn sql_job_cancel_should_mark_running_jobs_cancelled() {
+        clear_async_jobs();
+        let (base_url, _receiver) = start_delayed_mock_json_server(
+            "/v1/chat/completions",
+            r#"{
+                "id":"chatcmpl-async-cancel",
+                "object":"chat.completion",
+                "choices":[
+                    {
+                        "index":0,
+                        "message":{"role":"assistant","content":"too late"},
+                        "finish_reason":"stop"
+                    }
+                ],
+                "usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}
+            }"#,
+            Duration::from_secs(2),
+        );
+
+        let submitted = psql_json(&format!(
+            "SELECT postllm.configure(
+                runtime => 'openai',
+                base_url => {},
+                model => 'mock-async-cancel-model',
+                timeout_ms => 10000
+            );
+            SELECT postllm.job_submit(
+                kind => 'complete',
+                request => jsonb_build_object(
+                    'prompt', 'cancel me asynchronously',
+                    'temperature', 0.0,
+                    'max_tokens', 12
+                )
+            )",
+            sql_literal(&base_url)
+        ));
+        let job_id = submitted["id"]
+            .as_i64()
+            .expect("submitted async job should include an integer id");
+        let running = wait_for_async_job_status(job_id, &["running"], 2_000);
+        let cancelled = sql_json(&format!("SELECT postllm.job_cancel({job_id})"));
+        let finished = wait_for_async_job_status(job_id, &["cancelled"], 2_000);
+
+        assert_eq!(running["status"], "running");
+        assert_eq!(cancelled["status"], "cancelled");
+        assert_eq!(finished["status"], "cancelled");
+        assert_eq!(finished["error_message"], "job was cancelled");
+    }
+
+    #[pg_test]
+    #[should_panic(expected = "async jobs do not support direct postllm.api_key session secrets")]
+    fn sql_job_submit_should_reject_direct_api_key_sessions() {
+        clear_async_jobs();
+
+        drop(sql_json(
+            "SELECT postllm.configure(
+                runtime => 'openai',
+                base_url => 'https://example.invalid/v1/chat/completions',
+                model => 'mock-direct-key-model',
+                api_key => 'sk-direct-async'
+            )",
+        ));
+
+        drop(Spi::get_one::<JsonB>(
+            "SELECT postllm.job_submit(
+                kind => 'complete',
+                request => jsonb_build_object('prompt', 'should fail')
+            )",
         ));
     }
 
