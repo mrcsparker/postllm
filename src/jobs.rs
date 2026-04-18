@@ -5,7 +5,6 @@
 
 use crate::error::{Error, Result};
 use pgrx::JsonB;
-use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 use pgrx::datum::DatumWithOid;
 use pgrx::spi::Spi;
 use serde_json::{Value, json};
@@ -24,10 +23,8 @@ const JOB_STATUS_RUNNING: &str = "running";
 const JOB_STATUS_SUCCEEDED: &str = "succeeded";
 const JOB_STATUS_FAILED: &str = "failed";
 const JOB_STATUS_CANCELLED: &str = "cancelled";
-const WORKER_LIBRARY: &str = "postllm";
-const WORKER_FUNCTION: &str = "postllm_async_job_worker_main";
-const WORKER_NAME: &str = "postllm async job";
-const SUBPROCESS_FUNCTION: &str = "postllm._async_job_run";
+const SUBPROCESS_CLAIM_FUNCTION: &str = "postllm._async_job_claim_wait";
+const SUBPROCESS_RUN_FUNCTION: &str = "postllm._async_job_run";
 const WORKER_WAIT_FOR_ROW_MS: u64 = 2_000;
 const WORKER_WAIT_POLL_MS: u64 = 25;
 
@@ -234,70 +231,6 @@ impl ClaimedJob {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct WorkerContext {
-    job_id: i64,
-    database_oid: pgrx::pg_sys::Oid,
-    role_oid: pgrx::pg_sys::Oid,
-}
-
-impl WorkerContext {
-    fn encode(self) -> String {
-        format!("{}:{}:{}", self.job_id, self.database_oid, self.role_oid)
-    }
-
-    fn decode(value: &str) -> Result<Self> {
-        let mut parts = value.split(':');
-        let job_id = parts
-            .next()
-            .ok_or_else(|| {
-                Error::Internal("async job worker context was missing the job id".to_owned())
-            })?
-            .parse::<i64>()
-            .map_err(|error| {
-                Error::Internal(format!(
-                    "async job worker context contained an invalid job id: {error}"
-                ))
-            })?;
-        let database_oid = parts
-            .next()
-            .ok_or_else(|| {
-                Error::Internal("async job worker context was missing the database oid".to_owned())
-            })?
-            .parse::<u32>()
-            .map_err(|error| {
-                Error::Internal(format!(
-                    "async job worker context contained an invalid database oid: {error}"
-                ))
-            })?
-            .into();
-        let role_oid = parts
-            .next()
-            .ok_or_else(|| {
-                Error::Internal("async job worker context was missing the role oid".to_owned())
-            })?
-            .parse::<u32>()
-            .map_err(|error| {
-                Error::Internal(format!(
-                    "async job worker context contained an invalid role oid: {error}"
-                ))
-            })?
-            .into();
-
-        if parts.next().is_some() {
-            return Err(Error::Internal(
-                "async job worker context contained unexpected trailing fields".to_owned(),
-            ));
-        }
-
-        Ok(Self {
-            job_id,
-            database_oid,
-            role_oid,
-        })
-    }
-}
-
 pub(crate) fn submit(kind: &str, request: &Value) -> Result<Value> {
     let parsed = AsyncJobRequest::parse(kind, request)?;
     let settings_snapshot = crate::guc::async_job_settings_snapshot()?;
@@ -390,77 +323,21 @@ pub(crate) fn cancel(job_id: i64) -> Result<Value> {
     fetch_job_row(job_id, &submitted_by)
 }
 
-pub(crate) fn worker_main() {
-    BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGTERM);
-
-    let context = match WorkerContext::decode(BackgroundWorker::get_extra()) {
-        Ok(context) => context,
-        Err(error) => {
-            pgrx::warning!("postllm async worker could not decode its context: {error}");
-            return;
-        }
-    };
-
-    BackgroundWorker::connect_worker_to_spi_by_oid(Some(context.database_oid), None);
-
-    let claimed_job = match claim_job_with_retry(context.job_id) {
-        Ok(Some(job)) => job,
-        Ok(None) => {
-            let message = format!(
-                "async worker could not see job {} before the startup wait elapsed",
-                context.job_id
-            );
-            let _ = mark_job_failed_via_helper(context.job_id, &message);
-            pgrx::warning!("{message}");
-            return;
-        }
-        Err(error) => {
-            let message = format!(
-                "async worker failed before claiming job {}: {error}",
-                context.job_id
-            );
-            let _ = mark_job_failed_via_helper(context.job_id, &message);
-            pgrx::warning!("{message}");
-            return;
-        }
-    };
-
-    let result = BackgroundWorker::transaction(|| -> Result<Value> {
-        set_local_role_for_worker(&claimed_job.submitted_by)?;
-        crate::guc::apply_async_job_settings_snapshot(&claimed_job.settings_snapshot)?;
-        let request = AsyncJobRequest::parse(&claimed_job.kind, &claimed_job.request_payload)?;
-        request.execute()
-    });
-
-    match result {
-        Ok(result_payload) => {
-            let _ = finish_claimed_job(
-                context.job_id,
-                JOB_STATUS_SUCCEEDED,
-                Some(&result_payload),
-                None,
-            );
-        }
-        Err(error) => {
-            pgrx::warning!(
-                "postllm async worker failed job {}: {error}",
-                context.job_id
-            );
-            let _ = finish_claimed_job(context.job_id, JOB_STATUS_FAILED, None, Some(&error));
-        }
+pub(crate) fn claim_spawned_job(job_id: i64) -> Result<bool> {
+    match claim_job_by_polling(job_id)? {
+        Some(_) => Ok(true),
+        None => worker_mark_failed(
+            job_id,
+            "async runner could not see the queued job before the startup wait elapsed",
+        ),
     }
 }
 
 pub(crate) fn run_spawned_job(job_id: i64) -> Result<bool> {
-    let Some(claimed_job) = claim_job_by_polling(job_id)? else {
-        mark_job_launch_failure(
-            job_id,
-            "async runner could not see the queued job before the startup wait elapsed",
-        )?;
+    let Some(claimed_job) = fetch_running_job(job_id)? else {
         return Ok(false);
     };
 
-    set_local_role_for_worker(&claimed_job.submitted_by)?;
     crate::guc::apply_async_job_settings_snapshot(&claimed_job.settings_snapshot)?;
     let request = AsyncJobRequest::parse(&claimed_job.kind, &claimed_job.request_payload)?;
 
@@ -554,69 +431,16 @@ pub(crate) fn worker_mark_failed(job_id: i64, error_message: &str) -> Result<boo
     .map_err(Error::from)
 }
 
-fn claim_job_with_retry(job_id: i64) -> Result<Option<ClaimedJob>> {
-    let started = Instant::now();
-
-    loop {
-        if BackgroundWorker::sigterm_received() {
-            return Ok(None);
-        }
-
-        let claimed = BackgroundWorker::transaction(|| worker_claim_via_helper(job_id));
-        match claimed {
-            Ok(Some(value)) => return ClaimedJob::from_value(&value).map(Some),
-            Ok(None) => {
-                if started.elapsed() >= Duration::from_millis(WORKER_WAIT_FOR_ROW_MS) {
-                    return Ok(None);
-                }
-            }
-            Err(error) => return Err(error),
-        }
-
-        if !BackgroundWorker::wait_latch(Some(Duration::from_millis(WORKER_WAIT_POLL_MS))) {
-            return Ok(None);
-        }
-    }
-}
-
-fn finish_claimed_job(
-    job_id: i64,
-    status: &str,
-    result_payload: Option<&Value>,
-    error: Option<&Error>,
-) -> Result<bool> {
-    worker_finish_via_helper(
-        job_id,
-        status,
-        result_payload,
-        error.map(ToString::to_string).as_deref(),
-    )
-}
-
-fn launch_worker(context: WorkerContext) -> Result<()> {
-    BackgroundWorkerBuilder::new(WORKER_NAME)
-        .set_type(WORKER_NAME)
-        .set_library(WORKER_LIBRARY)
-        .set_function(WORKER_FUNCTION)
-        .enable_spi_access()
-        .set_extra(&context.encode())
-        .load_dynamic()
-        .map(|_| ())
-        .map_err(|_| {
-            Error::Config(
-                "unable to start an async background worker; fix: raise max_worker_processes or reduce concurrent async jobs"
-                    .to_owned(),
-            )
-        })
-}
-
 fn spawn_job_runner(job_id: i64, execute_role: &str) -> Result<()> {
     let socket_dir = current_socket_dir()?;
     let port = current_port()?;
     let database = current_database_name()?;
     let session_user = current_session_user()?;
     let quoted_role = quote_identifier(execute_role)?;
-
+    let claim_sql = format!(
+        "SET ROLE {quoted_role}; SELECT {SUBPROCESS_CLAIM_FUNCTION}({job_id});"
+    );
+    let run_sql = format!("SET ROLE {quoted_role}; SELECT {SUBPROCESS_RUN_FUNCTION}({job_id});");
     let _child = Command::new(psql_path())
         .args([
             "-X",
@@ -632,7 +456,9 @@ fn spawn_job_runner(job_id: i64, execute_role: &str) -> Result<()> {
             "-d",
             &database,
             "-c",
-            &format!("SET ROLE {quoted_role}; SELECT {SUBPROCESS_FUNCTION}({job_id});"),
+            &claim_sql,
+            "-c",
+            &run_sql,
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -645,21 +471,6 @@ fn spawn_job_runner(job_id: i64, execute_role: &str) -> Result<()> {
         })?;
 
     Ok(())
-}
-
-fn current_database_oid() -> Result<pgrx::pg_sys::Oid> {
-    Spi::get_one::<i64>("SELECT oid::bigint FROM pg_database WHERE datname = current_database()")
-        .map_err(Error::from)?
-        .ok_or_else(|| Error::Internal("current database oid was not available".to_owned()))
-        .and_then(|value| {
-            u32::try_from(value)
-                .map_err(|_| {
-                    Error::Internal(format!(
-                        "current database oid {value} could not be represented as u32"
-                    ))
-                })
-                .map(Into::into)
-        })
 }
 
 fn insert_job_row(
@@ -690,55 +501,6 @@ fn insert_job_row(
     .ok_or_else(|| Error::Internal("async job insert returned no row".to_owned()))
 }
 
-fn worker_claim_via_helper(job_id: i64) -> Result<Option<Value>> {
-    Spi::get_one_with_args::<JsonB>(
-        "SELECT postllm._async_job_claim($1)",
-        &[DatumWithOid::from(job_id)],
-    )
-    .map(|row| row.map(|value| value.0))
-    .map_err(Error::from)
-}
-
-fn worker_finish_via_helper(
-    job_id: i64,
-    status: &str,
-    result_payload: Option<&Value>,
-    error_message: Option<&str>,
-) -> Result<bool> {
-    let result_payload = result_payload.cloned().map(JsonB);
-
-    Spi::get_one_with_args::<bool>(
-        "SELECT postllm._async_job_finish($1, $2, $3, $4)",
-        &[
-            DatumWithOid::from(job_id),
-            DatumWithOid::from(status),
-            DatumWithOid::from(result_payload),
-            DatumWithOid::from(error_message),
-        ],
-    )
-    .map(|updated| updated.unwrap_or(false))
-    .map_err(Error::from)
-}
-
-fn mark_job_failed_via_helper(job_id: i64, error_message: &str) -> Result<bool> {
-    Spi::get_one_with_args::<bool>(
-        "SELECT postllm._async_job_mark_failed($1, $2)",
-        &[
-            DatumWithOid::from(job_id),
-            DatumWithOid::from(error_message),
-        ],
-    )
-    .map(|updated| updated.unwrap_or(false))
-    .map_err(Error::from)
-}
-
-fn set_local_role_for_worker(role_name: &str) -> Result<()> {
-    let quoted_role = quote_identifier(role_name)?;
-
-    let _ = Spi::run(&format!("SET LOCAL ROLE {quoted_role}"))?;
-    Ok(())
-}
-
 fn quote_identifier(value: &str) -> Result<String> {
     Spi::get_one_with_args::<String>("SELECT quote_ident($1)", &[DatumWithOid::from(value)])?
         .ok_or_else(|| Error::Internal("quote_ident returned no value".to_owned()))
@@ -758,6 +520,25 @@ fn claim_job_by_polling(job_id: i64) -> Result<Option<ClaimedJob>> {
 
         thread::sleep(Duration::from_millis(WORKER_WAIT_POLL_MS));
     }
+}
+
+fn fetch_running_job(job_id: i64) -> Result<Option<ClaimedJob>> {
+    Spi::get_one_with_args::<JsonB>(
+        r"
+        SELECT jsonb_build_object(
+            'submitted_by', submitted_by,
+            'kind', kind,
+            'request_payload', request_payload,
+            'settings_snapshot', settings_snapshot
+        )
+        FROM postllm.async_jobs
+        WHERE id = $1
+          AND status = 'running'
+        ",
+        &[DatumWithOid::from(job_id)],
+    )?
+    .map(|row| ClaimedJob::from_value(&row.0))
+    .transpose()
 }
 
 fn current_socket_dir() -> Result<String> {

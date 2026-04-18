@@ -106,6 +106,7 @@ Treat this as part of your architecture:
 - use `postllm.request_max_concurrency`, `postllm.request_token_budget`, `postllm.request_runtime_budget_ms`, and `postllm.request_spend_budget_microusd` when you need hard operator ceilings on concurrency, output size, wall-clock time, or estimated generated-output spend.
 - use `postllm.request_audit_log` only when you explicitly need audit visibility, and prefer redacted payload settings for routine production debugging.
 - when request logging is enabled, prefer `postllm.request_metrics`, `postllm.request_count_metrics`, `postllm.request_error_metrics`, `postllm.request_latency_metrics`, and `postllm.request_token_usage_metrics` for latency/error/token rollups instead of re-parsing JSON from the raw audit table.
+- use `postllm.job_submit(...)`, `postllm.job_poll(...)`, `postllm.job_result(...)`, and `postllm.job_cancel(...)` when you need durable submit/poll/cancel semantics for one request without wiring a separate application queue first.
 - use `runtime_discover()` and `runtime_ready()` in startup scripts.
 
 ## When it fits

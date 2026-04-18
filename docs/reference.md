@@ -84,6 +84,13 @@ This page is grouped by domain so you can scan what you need quickly.
 - `postllm.complete_many(prompts text[], ...) -> text[]`
 - `postllm.complete_many_rows(prompts text[], ...) -> table(index int, prompt text, completion text)`
 
+## Async jobs
+
+- `postllm.job_submit(kind text, request jsonb) -> jsonb`
+- `postllm.job_poll(job_id bigint) -> jsonb`
+- `postllm.job_result(job_id bigint) -> jsonb`
+- `postllm.job_cancel(job_id bigint) -> jsonb`
+
 ## Response helpers
 
 - `postllm.usage(response jsonb) -> jsonb`
@@ -116,4 +123,3 @@ This page is grouped by domain so you can scan what you need quickly.
 - `postllm.hybrid_rank(query text, documents text[], top_n int default null, model text default null, text_search_config text default null, semantic_weight double precision default 1.0, keyword_weight double precision default 1.0, rrf_k int default 60, normalization int default 32) -> table(rank int, index int, document text, score double precision, semantic_rank int, keyword_rank int, semantic_score double precision, keyword_score double precision)`
 - `postllm.rag(query text, documents text[], system_prompt text default null, model text default null, retrieval text default null, retrieval_model text default null, top_n int default 5, temperature double precision default 0.2, max_tokens int default null, text_search_config text default null, semantic_weight double precision default 1.0, keyword_weight double precision default 1.0, rrf_k int default 60, normalization int default 32) -> jsonb`
 - `postllm.rag_text(query text, documents text[], system_prompt text default null, model text default null, retrieval text default null, retrieval_model text default null, top_n int default 5, temperature double precision default 0.2, max_tokens int default null, text_search_config text default null, semantic_weight double precision default 1.0, keyword_weight double precision default 1.0, rrf_k int default 60, normalization int default 32) -> text`
-

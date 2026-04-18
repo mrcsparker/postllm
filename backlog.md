@@ -182,7 +182,7 @@ Exit criteria:
 
 Issues:
 
-- [ ] `PL-045` Add an async job model for submit, poll, fetch result, and cancel.
+- [x] `PL-045` Add an async job model for submit, poll, fetch result, and cancel.
 - [ ] `PL-046` Add `NOTIFY` or event-hook support for async completions and streaming progress.
 - [ ] `PL-047` Add conversation/session primitives for multi-turn workflows.
 - [ ] `PL-048` Add durable prompt registries with versioning and metadata.

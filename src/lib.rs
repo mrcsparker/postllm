@@ -35,12 +35,6 @@ pub extern "C-unwind" fn _PG_init() {
     guc::register();
 }
 
-/// Runs one dynamically launched async-job worker.
-#[pgrx::pg_guard]
-pub extern "C-unwind" fn postllm_async_job_worker_main(_arg: pgrx::pg_sys::Datum) {
-    jobs::worker_main();
-}
-
 pgrx::extension_sql!(
     r"
     COMMENT ON SCHEMA postllm IS
@@ -433,6 +427,16 @@ mod postllm {
     }
 
     #[doc(hidden)]
+    #[pg_extern(name = "_async_job_claim_wait", security_definer)]
+    #[search_path(postllm, pg_catalog)]
+    fn async_job_claim_wait(job_id: i64) -> bool {
+        match crate::jobs::claim_spawned_job(job_id) {
+            Ok(updated) => updated,
+            Err(error) => pgrx::error!("{error}"),
+        }
+    }
+
+    #[doc(hidden)]
     #[pg_extern(name = "_async_job_mark_failed", security_definer)]
     #[search_path(postllm, pg_catalog)]
     fn async_job_mark_failed(job_id: i64, error_message: &str) -> bool {
@@ -448,7 +452,11 @@ mod postllm {
     fn async_job_run(job_id: i64) -> bool {
         match crate::jobs::run_spawned_job(job_id) {
             Ok(updated) => updated,
-            Err(error) => pgrx::error!("{error}"),
+            Err(error) => {
+                let error_message = error.to_string();
+                let _ = crate::jobs::worker_finish(job_id, "failed", None, Some(&error_message));
+                false
+            }
         }
     }
 
@@ -6059,12 +6067,45 @@ mod tests {
         serde_json::from_str(json_line).expect("psql should emit valid JSON")
     }
 
-    fn clear_request_audit_log() {
-        sql_run("TRUNCATE postllm.request_audit_log RESTART IDENTITY");
+    fn psql_run(query: &str) {
+        let socket_dir = sql_text("SHOW unix_socket_directories")
+            .split(',')
+            .next()
+            .expect("socket directory should be available")
+            .trim()
+            .to_owned();
+        let port = sql_text("SHOW port");
+        let database = sql_text("SELECT current_database()::text");
+        let user = sql_text("SELECT session_user::text");
+        let output = Command::new(pg_test_psql_path())
+            .args([
+                "-X",
+                "-q",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-h",
+                &socket_dir,
+                "-p",
+                &port,
+                "-U",
+                &user,
+                "-d",
+                &database,
+                "-c",
+                query,
+            ])
+            .output()
+            .expect("psql should run the async-job command");
+
+        assert!(
+            output.status.success(),
+            "psql command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
-    fn clear_async_jobs() {
-        sql_run("TRUNCATE postllm.async_jobs RESTART IDENTITY");
+    fn clear_request_audit_log() {
+        sql_run("TRUNCATE postllm.request_audit_log RESTART IDENTITY");
     }
 
     fn request_audit_row_count() -> i64 {
@@ -6461,7 +6502,7 @@ mod tests {
     }
 
     fn read_mock_json_request(
-        mut stream: TcpStream,
+        stream: TcpStream,
         expected_path: &str,
         response_body: &str,
     ) -> Value {
@@ -8796,7 +8837,7 @@ mod tests {
 
     #[pg_test]
     fn sql_job_should_submit_poll_and_fetch_complete_results() {
-        clear_async_jobs();
+        psql_run("TRUNCATE postllm.async_jobs RESTART IDENTITY");
         let (base_url, receiver) = start_mock_json_server(
             "/v1/chat/completions",
             r#"{
@@ -8853,7 +8894,7 @@ mod tests {
 
     #[pg_test]
     fn sql_job_cancel_should_mark_running_jobs_cancelled() {
-        clear_async_jobs();
+        psql_run("TRUNCATE postllm.async_jobs RESTART IDENTITY");
         let (base_url, _receiver) = start_delayed_mock_json_server(
             "/v1/chat/completions",
             r#"{
@@ -8891,7 +8932,7 @@ mod tests {
         let job_id = submitted["id"]
             .as_i64()
             .expect("submitted async job should include an integer id");
-        let running = wait_for_async_job_status(job_id, &["running"], 2_000);
+        let running = wait_for_async_job_status(job_id, &["running"], 5_000);
         let cancelled = sql_json(&format!("SELECT postllm.job_cancel({job_id})"));
         let finished = wait_for_async_job_status(job_id, &["cancelled"], 2_000);
 
@@ -8904,7 +8945,7 @@ mod tests {
     #[pg_test]
     #[should_panic(expected = "async jobs do not support direct postllm.api_key session secrets")]
     fn sql_job_submit_should_reject_direct_api_key_sessions() {
-        clear_async_jobs();
+        psql_run("TRUNCATE postllm.async_jobs RESTART IDENTITY");
 
         drop(sql_json(
             "SELECT postllm.configure(
