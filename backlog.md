@@ -49,6 +49,8 @@ Last manually verified in-repo on 2026-04-05:
 - 2026-04-18 follow-up: `cargo pgrx test pg17 sql_prompt_ -F pg_test` passed.
 - 2026-04-18 follow-up: `cargo pgrx test pg17 sql_eval_ -F pg_test` passed.
 - 2026-04-18 follow-up: `python3 scripts/benchmark_suite.py --suite benchmarks/runtime_matrix.json --dry-run` passed.
+- 2026-04-18 follow-up: `cargo test --lib client::tests::` passed.
+- 2026-04-18 follow-up: `cargo pgrx test pg17 sql_chat_structured_should_support_responses_api_base_url -F pg_test` passed.
 
 This snapshot confirms the current hosted `llama-server` Docker lane and the local Candle Docker lane are both green. Keep this section current when backlog status is updated so the plan stays anchored to a real checked state instead of a guessed one.
 
@@ -208,7 +210,7 @@ Exit criteria:
 
 Issues:
 
-- [ ] `PL-051` Add an OpenAI Responses-style adapter in addition to chat-completions compatibility.
+- [x] `PL-051` Add an OpenAI Responses-style adapter in addition to chat-completions compatibility.
 - [ ] `PL-052` Add HTTP-backed embeddings so hosted providers fit the same mental model as local Candle embeddings.
 - [ ] `PL-053` Add native adapters for important providers that are not truly OpenAI-compatible.
 - [ ] `PL-054` Add multimodal inputs and model feature flags for vision, JSON mode, reasoning, and tool use.

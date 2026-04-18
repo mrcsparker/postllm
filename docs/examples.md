@@ -399,7 +399,7 @@ For a complete `pgvector` workflow, see [docs/pgvector-integration.md](./pgvecto
 ## OpenAI-compatible quick check
 
 ```sql
-SET postllm.base_url = 'https://api.openai.com/v1/chat/completions';
+SET postllm.base_url = 'https://api.openai.com/v1/responses';
 SET postllm.api_key = 'sk-...';
 SET postllm.model = 'gpt-4o-mini';
 
@@ -410,4 +410,3 @@ SELECT postllm.complete(
     max_tokens => 120
 );
 ```
-

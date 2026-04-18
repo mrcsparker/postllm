@@ -5,6 +5,7 @@
 
 use crate::error::{Error, Result};
 use reqwest::StatusCode;
+use reqwest::Url;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{Value, json};
@@ -18,6 +19,12 @@ const INTERRUPT_POLL_INTERVAL_MS: u64 = 25;
 const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(INTERRUPT_POLL_INTERVAL_MS);
 
 type HttpRequestResult<T> = core::result::Result<T, HttpRequestError>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostedEndpointFlavor {
+    ChatCompletions,
+    Responses,
+}
 
 #[derive(Debug)]
 enum HttpRequestError {
@@ -407,14 +414,17 @@ fn execute_chat_response_once(
         .timeout(Duration::from_millis(settings.timeout_ms))
         .build()
         .map_err(HttpRequestError::Transport)?;
-    let payload = build_request_payload(
+    let endpoint = hosted_endpoint_flavor(base_url);
+    let payload = build_request_payload_for_endpoint(
+        endpoint,
         &settings.model,
         messages,
         options,
         response_format,
         tools,
         tool_choice,
-    );
+    )
+    .map_err(HttpRequestError::Postllm)?;
     let mut request = client
         .post(base_url)
         .header(CONTENT_TYPE, "application/json")
@@ -435,7 +445,9 @@ fn execute_chat_response_once(
         });
     }
 
-    serde_json::from_slice(&body).map_err(HttpRequestError::JsonDecode)
+    let response = serde_json::from_slice(&body).map_err(HttpRequestError::JsonDecode)?;
+
+    normalize_response_for_endpoint(endpoint, &response).map_err(HttpRequestError::Postllm)
 }
 
 fn execute_chat_stream_response(
@@ -473,7 +485,10 @@ fn execute_chat_stream_response_once(
         .timeout(Duration::from_millis(settings.timeout_ms))
         .build()
         .map_err(HttpRequestError::Transport)?;
-    let payload = build_stream_request_payload(&settings.model, messages, options);
+    let endpoint = hosted_endpoint_flavor(base_url);
+    let payload =
+        build_stream_request_payload_for_endpoint(endpoint, &settings.model, messages, options)
+            .map_err(HttpRequestError::Postllm)?;
     let mut request = client
         .post(base_url)
         .header(CONTENT_TYPE, "application/json")
@@ -494,7 +509,9 @@ fn execute_chat_stream_response_once(
         });
     }
 
-    parse_sse_json_events_interruptible(BufReader::new(response), cancelled)
+    let events = parse_sse_json_events_interruptible(BufReader::new(response), cancelled)?;
+
+    normalize_stream_events_for_endpoint(endpoint, &events).map_err(HttpRequestError::Postllm)
 }
 
 fn execute_rerank_response(
@@ -634,43 +651,15 @@ fn retry_http_request<T>(
 
 /// Extracts the first textual completion from a provider response.
 pub(crate) fn extract_text(response: &Value) -> Result<String> {
-    let Some(choices) = response.get("choices").and_then(Value::as_array) else {
-        return Err(Error::MalformedResponse);
-    };
-
-    let Some(first_choice) = choices.first() else {
-        return Err(Error::MalformedResponse);
-    };
-
-    if let Some(text) = first_choice.get("text").and_then(Value::as_str) {
-        return Ok(text.to_owned());
+    if let Some(text) = extract_chat_completion_text(response) {
+        return Ok(text);
     }
 
-    let Some(content) = first_choice
-        .get("message")
-        .and_then(|message| message.get("content"))
-    else {
-        return Err(Error::MalformedResponse);
-    };
-
-    match content {
-        Value::String(text) => Ok(text.clone()),
-        Value::Array(parts) => {
-            let text = parts
-                .iter()
-                .filter_map(|part| part.get("text").and_then(Value::as_str))
-                .collect::<String>();
-
-            if text.is_empty() {
-                Err(Error::MalformedResponse)
-            } else {
-                Ok(text)
-            }
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::Object(_) => {
-            Err(Error::MalformedResponse)
-        }
+    if let Some(text) = extract_responses_output_text(response) {
+        return Ok(text);
     }
+
+    Err(Error::MalformedResponse)
 }
 
 /// Builds the JSON payload sent to an OpenAI-compatible chat endpoint.
@@ -715,6 +704,35 @@ pub(crate) fn build_request_payload(
     payload
 }
 
+fn build_request_payload_for_endpoint(
+    endpoint: HostedEndpointFlavor,
+    model: &str,
+    messages: &[Value],
+    options: crate::backend::RequestOptions,
+    response_format: Option<&Value>,
+    tools: Option<&[Value]>,
+    tool_choice: Option<&Value>,
+) -> Result<Value> {
+    match endpoint {
+        HostedEndpointFlavor::ChatCompletions => Ok(build_request_payload(
+            model,
+            messages,
+            options,
+            response_format,
+            tools,
+            tool_choice,
+        )),
+        HostedEndpointFlavor::Responses => build_responses_request_payload(
+            model,
+            messages,
+            options,
+            response_format,
+            tools,
+            tool_choice,
+        ),
+    }
+}
+
 /// Builds the JSON payload sent to a hosted rerank endpoint.
 pub(crate) fn build_rerank_request_payload(
     model: &str,
@@ -749,6 +767,506 @@ fn build_stream_request_payload(
     }
 
     payload
+}
+
+fn build_stream_request_payload_for_endpoint(
+    endpoint: HostedEndpointFlavor,
+    model: &str,
+    messages: &[Value],
+    options: crate::backend::RequestOptions,
+) -> Result<Value> {
+    match endpoint {
+        HostedEndpointFlavor::ChatCompletions => {
+            Ok(build_stream_request_payload(model, messages, options))
+        }
+        HostedEndpointFlavor::Responses => {
+            let mut payload =
+                build_responses_request_payload(model, messages, options, None, None, None)?;
+
+            if let Some(object) = payload.as_object_mut() {
+                object.insert("stream".to_owned(), json!(true));
+            }
+
+            Ok(payload)
+        }
+    }
+}
+
+fn messages_to_responses_input(messages: &[Value]) -> Result<Vec<Value>> {
+    let mut input = Vec::new();
+
+    for message in messages {
+        input.extend(message_to_responses_items(message)?);
+    }
+
+    Ok(input)
+}
+
+fn message_to_responses_items(message: &Value) -> Result<Vec<Value>> {
+    let role = message
+        .get("role")
+        .and_then(Value::as_str)
+        .ok_or(Error::MalformedResponse)?;
+
+    match role {
+        "system" | "user" => Ok(vec![json!({
+            "role": role,
+            "content": responses_message_content(message.get("content"))?,
+        })]),
+        "assistant" => assistant_message_to_responses_items(message),
+        "tool" => Ok(vec![json!({
+            "type": "function_call_output",
+            "call_id": message
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .ok_or(Error::MalformedResponse)?,
+            "output": stringify_message_content(message.get("content"))?,
+        })]),
+        _ => Err(Error::MalformedResponse),
+    }
+}
+
+fn assistant_message_to_responses_items(message: &Value) -> Result<Vec<Value>> {
+    let mut items = Vec::new();
+
+    if let Some(content) = message.get("content")
+        && !content.is_null()
+    {
+        items.push(json!({
+            "role": "assistant",
+            "content": responses_message_content(Some(content))?,
+        }));
+    }
+
+    if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+        for tool_call in tool_calls {
+            let function = tool_call.get("function").ok_or(Error::MalformedResponse)?;
+            items.push(json!({
+                "type": "function_call",
+                "call_id": tool_call
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or(Error::MalformedResponse)?,
+                "name": function
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .ok_or(Error::MalformedResponse)?,
+                "arguments": function
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .ok_or(Error::MalformedResponse)?,
+            }));
+        }
+    }
+
+    Ok(items)
+}
+
+fn responses_message_content(content: Option<&Value>) -> Result<Value> {
+    match content.unwrap_or(&Value::Null) {
+        Value::String(text) => Ok(json!([{
+            "type": "input_text",
+            "text": text,
+        }])),
+        Value::Array(parts) => parts
+            .iter()
+            .map(response_input_part)
+            .collect::<Result<Vec<Value>>>()
+            .map(Value::Array),
+        Value::Null => Ok(Value::Array(Vec::new())),
+        Value::Bool(_) | Value::Number(_) | Value::Object(_) => Err(Error::MalformedResponse),
+    }
+}
+
+fn response_input_part(part: &Value) -> Result<Value> {
+    let part_type = part
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or(Error::MalformedResponse)?;
+
+    match part_type {
+        "text" => Ok(json!({
+            "type": "input_text",
+            "text": part
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or(Error::MalformedResponse)?,
+        })),
+        "image_url" => {
+            let image_url = part.get("image_url").ok_or(Error::MalformedResponse)?;
+            let mut normalized = json!({
+                "type": "input_image",
+                "image_url": image_url
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .ok_or(Error::MalformedResponse)?,
+            });
+
+            if let Some(detail) = image_url.get("detail").and_then(Value::as_str)
+                && let Some(object) = normalized.as_object_mut()
+            {
+                object.insert("detail".to_owned(), json!(detail));
+            }
+
+            Ok(normalized)
+        }
+        _ => Err(Error::MalformedResponse),
+    }
+}
+
+fn stringify_message_content(content: Option<&Value>) -> Result<String> {
+    match content.unwrap_or(&Value::Null) {
+        Value::String(text) => Ok(text.clone()),
+        Value::Array(parts) => {
+            let text = parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<String>();
+
+            if text.is_empty() {
+                Err(Error::MalformedResponse)
+            } else {
+                Ok(text)
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::Object(_) => {
+            Err(Error::MalformedResponse)
+        }
+    }
+}
+
+fn hosted_endpoint_flavor(base_url: &str) -> HostedEndpointFlavor {
+    let Ok(url) = Url::parse(base_url) else {
+        return HostedEndpointFlavor::ChatCompletions;
+    };
+    let Some(last_segment) = url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+    else {
+        return HostedEndpointFlavor::ChatCompletions;
+    };
+
+    if last_segment == "responses" {
+        HostedEndpointFlavor::Responses
+    } else {
+        HostedEndpointFlavor::ChatCompletions
+    }
+}
+
+fn normalize_response_for_endpoint(
+    endpoint: HostedEndpointFlavor,
+    response: &Value,
+) -> Result<Value> {
+    match endpoint {
+        HostedEndpointFlavor::ChatCompletions => Ok(response.clone()),
+        HostedEndpointFlavor::Responses => normalize_responses_api_response(response),
+    }
+}
+
+fn normalize_stream_events_for_endpoint(
+    endpoint: HostedEndpointFlavor,
+    events: &[Value],
+) -> Result<Vec<Value>> {
+    match endpoint {
+        HostedEndpointFlavor::ChatCompletions => Ok(events.to_vec()),
+        HostedEndpointFlavor::Responses => normalize_responses_stream_events(events),
+    }
+}
+
+fn normalize_responses_api_response(response: &Value) -> Result<Value> {
+    let tool_calls = extract_responses_tool_calls(response)?;
+    let content = extract_responses_output_text(response).map_or(Value::Null, Value::String);
+    let finish_reason = responses_finish_reason(response, !tool_calls.is_empty());
+
+    let mut message = json!({
+        "role": "assistant",
+        "content": content,
+    });
+
+    if !tool_calls.is_empty()
+        && let Some(object) = message.as_object_mut()
+    {
+        object.insert("tool_calls".to_owned(), Value::Array(tool_calls));
+    }
+
+    Ok(json!({
+        "id": response.get("id").cloned().unwrap_or(Value::Null),
+        "object": "chat.completion",
+        "model": response.get("model").cloned().unwrap_or(Value::Null),
+        "choices": [{
+            "index": 0,
+            "message": message,
+            "finish_reason": finish_reason,
+        }],
+        "usage": responses_usage(response),
+    }))
+}
+
+fn normalize_responses_stream_events(events: &[Value]) -> Result<Vec<Value>> {
+    let mut normalized = Vec::new();
+
+    for event in events {
+        let event_type =
+            event
+                .get("type")
+                .and_then(Value::as_str)
+                .ok_or(Error::MalformedStream(
+                    "responses stream event did not include a type".to_owned(),
+                ))?;
+
+        match event_type {
+            "response.output_text.delta" => normalized.push(json!({
+                "id": event.get("response_id").cloned().unwrap_or(Value::Null),
+                "object": "chat.completion.chunk",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "content": event.get("delta").cloned().unwrap_or(Value::Null),
+                    },
+                    "finish_reason": Value::Null,
+                }],
+            })),
+            "response.output_item.added" => {
+                if let Some(item) = event.get("item")
+                    && item.get("type").and_then(Value::as_str) == Some("function_call")
+                {
+                    normalized.push(json!({
+                        "id": event.get("response_id").cloned().unwrap_or(Value::Null),
+                        "object": "chat.completion.chunk",
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [{
+                                    "index": 0,
+                                    "id": item.get("call_id").cloned().unwrap_or(Value::Null),
+                                    "type": "function",
+                                    "function": {
+                                        "name": item.get("name").cloned().unwrap_or(Value::Null),
+                                    },
+                                }],
+                            },
+                            "finish_reason": Value::Null,
+                        }],
+                    }));
+                }
+            }
+            "response.function_call_arguments.delta" => normalized.push(json!({
+                "id": event.get("response_id").cloned().unwrap_or(Value::Null),
+                "object": "chat.completion.chunk",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": event.get("call_id").cloned().unwrap_or(Value::Null),
+                            "type": "function",
+                            "function": {
+                                "arguments": event.get("delta").cloned().unwrap_or(Value::Null),
+                            },
+                        }],
+                    },
+                    "finish_reason": Value::Null,
+                }],
+            })),
+            "response.completed" | "response.done" => {
+                let response = event.get("response").unwrap_or(event);
+                normalized.push(json!({
+                    "id": response.get("id").cloned().unwrap_or(Value::Null),
+                    "object": "chat.completion.chunk",
+                    "model": response.get("model").cloned().unwrap_or(Value::Null),
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": responses_finish_reason(
+                            response,
+                            !extract_responses_tool_calls(response)?.is_empty(),
+                        ),
+                    }],
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    if normalized.is_empty() {
+        return Err(Error::MalformedStream(
+            "responses stream did not contain any text, tool, or completion events".to_owned(),
+        ));
+    }
+
+    Ok(normalized)
+}
+
+fn extract_chat_completion_text(response: &Value) -> Option<String> {
+    let choices = response.get("choices").and_then(Value::as_array)?;
+    let first_choice = choices.first()?;
+
+    if let Some(text) = first_choice.get("text").and_then(Value::as_str) {
+        return Some(text.to_owned());
+    }
+
+    let content = first_choice
+        .get("message")
+        .and_then(|message| message.get("content"))?;
+
+    match content {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(parts) => {
+            let text = parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<String>();
+
+            (!text.is_empty()).then_some(text)
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::Object(_) => None,
+    }
+}
+
+fn extract_responses_output_text(response: &Value) -> Option<String> {
+    if let Some(text) = response.get("output_text").and_then(Value::as_str)
+        && !text.is_empty()
+    {
+        return Some(text.to_owned());
+    }
+
+    let mut collected = String::new();
+    let output = response.get("output").and_then(Value::as_array)?;
+
+    for item in output {
+        if item.get("type").and_then(Value::as_str) != Some("message") {
+            continue;
+        }
+
+        let Some(content) = item.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+
+        for part in content {
+            let is_text_part = matches!(
+                part.get("type").and_then(Value::as_str),
+                Some("output_text" | "text")
+            );
+
+            if is_text_part && let Some(text) = part.get("text").and_then(Value::as_str) {
+                collected.push_str(text);
+            }
+        }
+    }
+
+    (!collected.is_empty()).then_some(collected)
+}
+
+fn extract_responses_tool_calls(response: &Value) -> Result<Vec<Value>> {
+    let Some(output) = response.get("output").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+
+    output
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+        .map(|item| {
+            Ok(json!({
+                "id": item
+                    .get("call_id")
+                    .cloned()
+                    .or_else(|| item.get("id").cloned())
+                    .unwrap_or(Value::Null),
+                "type": "function",
+                "function": {
+                    "name": item
+                        .get("name")
+                        .cloned()
+                        .ok_or(Error::MalformedResponse)?,
+                    "arguments": item
+                        .get("arguments")
+                        .cloned()
+                        .unwrap_or_else(|| Value::String("{}".to_owned())),
+                }
+            }))
+        })
+        .collect()
+}
+
+fn responses_usage(response: &Value) -> Value {
+    let Some(usage) = response.get("usage").and_then(Value::as_object) else {
+        return Value::Null;
+    };
+
+    json!({
+        "prompt_tokens": usage.get("input_tokens").cloned().unwrap_or(Value::Null),
+        "completion_tokens": usage.get("output_tokens").cloned().unwrap_or(Value::Null),
+        "total_tokens": usage.get("total_tokens").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn responses_finish_reason(response: &Value, has_tool_calls: bool) -> Value {
+    if has_tool_calls {
+        return Value::String("tool_calls".to_owned());
+    }
+
+    match response.get("status").and_then(Value::as_str) {
+        Some("completed") => Value::String("stop".to_owned()),
+        Some("incomplete") => response
+            .get("incomplete_details")
+            .and_then(|details| details.get("reason"))
+            .and_then(Value::as_str)
+            .map_or_else(
+                || Value::String("length".to_owned()),
+                |reason| match reason {
+                    "max_output_tokens" => Value::String("length".to_owned()),
+                    _ => Value::String(reason.to_owned()),
+                },
+            ),
+        Some(status) => Value::String(status.to_owned()),
+        None => Value::Null,
+    }
+}
+
+fn build_responses_request_payload(
+    model: &str,
+    messages: &[Value],
+    options: crate::backend::RequestOptions,
+    response_format: Option<&Value>,
+    tools: Option<&[Value]>,
+    tool_choice: Option<&Value>,
+) -> Result<Value> {
+    let mut payload = json!({
+        "model": model,
+        "input": messages_to_responses_input(messages)?,
+        "temperature": options.temperature,
+    });
+
+    if let Some(max_tokens) = options.max_tokens
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert("max_output_tokens".to_owned(), json!(max_tokens));
+    }
+
+    if let Some(response_format) = response_format
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert(
+            "text".to_owned(),
+            json!({
+                "format": response_format,
+            }),
+        );
+    }
+
+    if let Some(tools) = tools
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert("tools".to_owned(), json!(tools));
+    }
+
+    if let Some(tool_choice) = tool_choice
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert("tool_choice".to_owned(), tool_choice.clone());
+    }
+
+    Ok(payload)
 }
 
 #[cfg(test)]
@@ -939,9 +1457,11 @@ fn parse_rerank_response(
 )]
 mod tests {
     use super::{
-        build_request_payload, build_rerank_request_payload, build_stream_request_payload,
-        chat_response, chat_stream_response, extract_text, parse_rerank_response,
-        parse_sse_json_events, rerank_response,
+        HostedEndpointFlavor, build_request_payload, build_request_payload_for_endpoint,
+        build_rerank_request_payload, build_stream_request_payload, chat_response,
+        chat_stream_response, extract_text, hosted_endpoint_flavor,
+        normalize_response_for_endpoint, normalize_stream_events_for_endpoint,
+        parse_rerank_response, parse_sse_json_events, rerank_response,
     };
     use crate::backend::test_support::SettingsBuilder;
     use crate::backend::{RequestOptions, RerankResult, Runtime, Settings};
@@ -990,19 +1510,22 @@ mod tests {
     }
 
     fn start_mock_server(response_body: &str) -> (String, mpsc::Receiver<ObservedRequest>) {
-        start_mock_server_with_content_type(response_body, "application/json")
+        start_mock_server_at_path("/v1/chat/completions", response_body, "application/json")
     }
 
     fn start_mock_stream_server(response_body: &str) -> (String, mpsc::Receiver<ObservedRequest>) {
-        start_mock_server_with_content_type(response_body, "text/event-stream")
+        start_mock_server_at_path("/v1/chat/completions", response_body, "text/event-stream")
     }
 
-    fn start_mock_server_with_content_type(
+    fn start_mock_server_at_path(
+        path: &str,
         response_body: &str,
         content_type: &str,
     ) -> (String, mpsc::Receiver<ObservedRequest>) {
-        let (address, receiver) =
-            start_mock_server_sequence(vec![MockResponse::new(200, content_type, response_body)]);
+        let (address, receiver) = start_mock_server_sequence_at_path(
+            path,
+            vec![MockResponse::new(200, content_type, response_body)],
+        );
 
         let (sender, single_receiver) = mpsc::channel();
         thread::spawn(move || {
@@ -1023,13 +1546,22 @@ mod tests {
     fn start_mock_server_sequence(
         responses: Vec<MockResponse>,
     ) -> (String, mpsc::Receiver<Vec<ObservedRequest>>) {
+        start_mock_server_sequence_at_path("/v1/chat/completions", responses)
+    }
+
+    fn start_mock_server_sequence_at_path(
+        path: &str,
+        responses: Vec<MockResponse>,
+    ) -> (String, mpsc::Receiver<Vec<ObservedRequest>>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
         let address = format!(
-            "http://{}/v1/chat/completions",
+            "http://{}{}",
             listener
                 .local_addr()
-                .expect("listener should have a local address")
+                .expect("listener should have a local address"),
+            path,
         );
+        let expected_path = path.to_owned();
         let (sender, receiver) = mpsc::channel();
 
         thread::spawn(move || {
@@ -1038,7 +1570,7 @@ mod tests {
                 let (stream, _) = listener
                     .accept()
                     .expect("server should accept one connection per configured response");
-                let observed_request = read_request(stream, &response);
+                let observed_request = read_request(stream, &expected_path, &response);
                 observed_requests.push(observed_request);
             }
             sender
@@ -1049,14 +1581,18 @@ mod tests {
         (address, receiver)
     }
 
-    fn read_request(mut stream: TcpStream, response: &MockResponse) -> ObservedRequest {
+    fn read_request(
+        mut stream: TcpStream,
+        expected_path: &str,
+        response: &MockResponse,
+    ) -> ObservedRequest {
         let mut reader = BufReader::new(stream.try_clone().expect("stream should clone"));
         let mut request_line = String::new();
         reader
             .read_line(&mut request_line)
             .expect("request line should read");
         assert!(
-            request_line.starts_with("POST /v1/chat/completions HTTP/1.1"),
+            request_line.starts_with(&format!("POST {expected_path} HTTP/1.1")),
             "unexpected request line: {request_line}"
         );
 
@@ -1152,6 +1688,18 @@ mod tests {
         assert_eq!(payload["model"], "llama3.2");
         assert_eq!(payload["messages"][0]["role"], "user");
         assert_eq!(payload["max_tokens"], 64);
+    }
+
+    #[test]
+    fn hosted_endpoint_flavor_should_detect_responses_urls() {
+        assert_eq!(
+            hosted_endpoint_flavor("https://api.openai.com/v1/responses"),
+            HostedEndpointFlavor::Responses
+        );
+        assert_eq!(
+            hosted_endpoint_flavor("https://api.openai.com/v1/chat/completions"),
+            HostedEndpointFlavor::ChatCompletions
+        );
     }
 
     #[test]
@@ -1561,5 +2109,197 @@ mod tests {
 
         assert_eq!(payload["tools"], json!(tools));
         assert_eq!(payload["tool_choice"], tool_choice);
+    }
+
+    #[test]
+    fn build_request_payload_for_responses_should_translate_input_and_text_format() {
+        let response_format = json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "person",
+                "strict": true,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    },
+                    "required": ["name"],
+                    "additionalProperties": false
+                }
+            }
+        });
+        let payload = build_request_payload_for_endpoint(
+            HostedEndpointFlavor::Responses,
+            "gpt-4.1-mini",
+            &[json!({"role": "user", "content": "Say hi"})],
+            request_options(),
+            Some(&response_format),
+            None,
+            None,
+        )
+        .expect("responses payload should build");
+
+        assert_eq!(payload["model"], "gpt-4.1-mini");
+        assert_eq!(payload["input"][0]["role"], "user");
+        assert_eq!(payload["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(payload["input"][0]["content"][0]["text"], "Say hi");
+        assert_eq!(payload["max_output_tokens"], 64);
+        assert_eq!(payload["text"]["format"], response_format);
+    }
+
+    #[test]
+    fn normalize_response_for_responses_should_produce_chat_completion_shape() {
+        let normalized = normalize_response_for_endpoint(
+            HostedEndpointFlavor::Responses,
+            &json!({
+                "id": "resp_123",
+                "model": "gpt-4.1-mini",
+                "status": "completed",
+                "output_text": "hello from responses",
+                "usage": {
+                    "input_tokens": 7,
+                    "output_tokens": 5,
+                    "total_tokens": 12
+                },
+                "output": [{
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "hello from responses"
+                    }]
+                }]
+            }),
+        )
+        .expect("responses payload should normalize");
+
+        assert_eq!(
+            normalized["choices"][0]["message"]["content"],
+            "hello from responses"
+        );
+        assert_eq!(normalized["choices"][0]["finish_reason"], "stop");
+        assert_eq!(normalized["usage"]["prompt_tokens"], 7);
+        assert_eq!(normalized["usage"]["completion_tokens"], 5);
+    }
+
+    #[test]
+    fn normalize_response_for_responses_should_produce_tool_calls() {
+        let normalized = normalize_response_for_endpoint(
+            HostedEndpointFlavor::Responses,
+            &json!({
+                "id": "resp_456",
+                "model": "gpt-4.1-mini",
+                "status": "completed",
+                "output": [{
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "lookup_weather",
+                    "arguments": "{\"city\":\"Austin\"}"
+                }]
+            }),
+        )
+        .expect("responses tool call should normalize");
+
+        assert_eq!(normalized["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(
+            normalized["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+            "lookup_weather"
+        );
+    }
+
+    #[test]
+    fn normalize_stream_events_for_responses_should_emit_chunk_shapes() {
+        let events = normalize_stream_events_for_endpoint(
+            HostedEndpointFlavor::Responses,
+            &[
+                json!({
+                    "type": "response.output_text.delta",
+                    "response_id": "resp_123",
+                    "delta": "hel"
+                }),
+                json!({
+                    "type": "response.output_text.delta",
+                    "response_id": "resp_123",
+                    "delta": "lo"
+                }),
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_123",
+                        "model": "gpt-4.1-mini",
+                        "status": "completed",
+                        "output_text": "hello"
+                    }
+                }),
+            ],
+        )
+        .expect("responses stream events should normalize");
+
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0]["choices"][0]["delta"]["content"], "hel");
+        assert_eq!(events[2]["choices"][0]["finish_reason"], "stop");
+    }
+
+    #[test]
+    fn chat_response_should_normalize_responses_api_output() {
+        let (base_url, receiver) = start_mock_server_at_path(
+            "/v1/responses",
+            r#"{
+                "id":"resp_123",
+                "model":"gpt-4.1-mini",
+                "status":"completed",
+                "output_text":"hello from responses",
+                "usage":{"input_tokens":7,"output_tokens":5,"total_tokens":12},
+                "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello from responses"}]}]
+            }"#,
+            "application/json",
+        );
+        let messages = vec![json!({"role": "user", "content": "Hello"})];
+
+        let response = chat_response(
+            &settings(base_url),
+            &messages,
+            request_options(),
+            None,
+            None,
+            None,
+        )
+        .expect("responses chat request should succeed");
+        let observed_request = receiver
+            .recv()
+            .expect("mock server should observe the request");
+
+        assert_eq!(observed_request.body["input"][0]["role"], "user");
+        assert_eq!(observed_request.body["max_output_tokens"], 64);
+        assert_eq!(
+            response["choices"][0]["message"]["content"],
+            "hello from responses"
+        );
+    }
+
+    #[test]
+    fn chat_stream_response_should_normalize_responses_stream_events() {
+        let (base_url, receiver) = start_mock_server_at_path(
+            "/v1/responses",
+            concat!(
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_123\",\"model\":\"gpt-4.1-mini\",\"status\":\"in_progress\"}}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_123\",\"delta\":\"hel\"}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_123\",\"delta\":\"lo\"}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_123\",\"model\":\"gpt-4.1-mini\",\"status\":\"completed\",\"output_text\":\"hello\"}}\n\n"
+            ),
+            "text/event-stream",
+        );
+        let messages = vec![json!({"role": "user", "content": "Hello"})];
+
+        let events = chat_stream_response(&settings(base_url), &messages, request_options())
+            .expect("responses streaming chat request should succeed");
+        let observed_request = receiver
+            .recv()
+            .expect("mock server should observe the request");
+
+        assert_eq!(observed_request.body["stream"], true);
+        assert_eq!(observed_request.body["input"][0]["role"], "user");
+        assert_eq!(events[0]["choices"][0]["delta"]["content"], "hel");
+        assert_eq!(events[2]["choices"][0]["finish_reason"], "stop");
     }
 }

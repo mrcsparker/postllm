@@ -53,6 +53,8 @@ SELECT postllm.configure(
 );
 ```
 
+For hosted inference, `postllm.base_url` may target either a Chat Completions-style endpoint like `/v1/chat/completions` or a Responses-style endpoint like `/v1/responses`.
+
 ## Request guardrails
 
 Operators can add coarse per-request limits without changing application SQL:
@@ -103,7 +105,7 @@ SELECT postllm.secret_set(
 SELECT postllm.profile_set(
     name => 'hosted-prod',
     runtime => 'openai',
-    base_url => 'https://api.openai.com/v1/chat/completions',
+    base_url => 'https://api.openai.com/v1/responses',
     model => 'gpt-4.1-mini',
     api_key_secret => 'openai-prod'
 );

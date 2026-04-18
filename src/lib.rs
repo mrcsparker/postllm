@@ -9116,6 +9116,75 @@ mod tests {
     }
 
     #[pg_test]
+    fn sql_chat_structured_should_support_responses_api_base_url() {
+        let (base_url, receiver) = start_mock_json_server(
+            "/v1/responses",
+            r#"{
+                "id":"resp-structured",
+                "model":"gpt-4.1-mini",
+                "status":"completed",
+                "output_text":"{\"name\":\"Ada\",\"country\":\"UK\"}",
+                "usage":{"input_tokens":8,"output_tokens":6,"total_tokens":14},
+                "output":[
+                    {
+                        "type":"message",
+                        "role":"assistant",
+                        "content":[
+                            {"type":"output_text","text":"{\"name\":\"Ada\",\"country\":\"UK\"}"}
+                        ]
+                    }
+                ]
+            }"#,
+        );
+
+        drop(sql_json(&format!(
+            "SELECT postllm.configure(
+                runtime => 'openai',
+                base_url => {},
+                model => 'gpt-4.1-mini'
+            )",
+            sql_literal(&base_url)
+        )));
+
+        let response = sql_json(
+            r#"SELECT postllm.chat_structured(
+                ARRAY[
+                    postllm.system('Return JSON only.'),
+                    postllm.user('Return name and country for Ada.')
+                ],
+                postllm.json_schema(
+                    'person',
+                    '{
+                        "type":"object",
+                        "properties":{
+                            "name":{"type":"string"},
+                            "country":{"type":"string"}
+                        },
+                        "required":["name","country"],
+                        "additionalProperties":false
+                    }'::jsonb
+                ),
+                temperature => 0.0,
+                max_tokens => 32
+            )"#,
+        );
+        let request_body = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("mock server should capture the responses-api structured request");
+
+        assert_eq!(response["name"], "Ada");
+        assert_eq!(response["country"], "UK");
+        assert_eq!(request_body["input"][0]["role"], "system");
+        assert_eq!(request_body["input"][1]["role"], "user");
+        assert_eq!(request_body["input"][1]["content"][0]["type"], "input_text");
+        assert_eq!(
+            request_body["text"]["format"]["json_schema"]["name"],
+            "person"
+        );
+        assert_eq!(request_body["max_output_tokens"], 32);
+    }
+
+    #[pg_test]
     fn sql_eval_registry_should_store_score_and_delete_cases() {
         sql_run("TRUNCATE postllm.eval_cases, postllm.eval_datasets RESTART IDENTITY CASCADE");
 

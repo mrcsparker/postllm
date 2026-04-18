@@ -62,7 +62,7 @@ For full signatures, use the grouped list in [docs/reference.md](./docs/referenc
 
 `postllm` exposes two runtime lanes:
 
-- `openai` for `OpenAI`-compatible HTTP APIs (`OpenAI`, Ollama, llama-server style).
+- `openai` for `OpenAI`-compatible HTTP APIs, including both Chat Completions and Responses-style endpoints (`OpenAI`, Ollama, llama-server style).
 - `candle` for local inference paths (embeddings, reranking, and starter generation).
 
 The SQL API shape is shared across runtimes; capability checks determine what arguments are valid in each lane.
