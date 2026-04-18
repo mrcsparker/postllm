@@ -200,3 +200,57 @@ pub(crate) fn conversation_reply(
         max_tokens,
     ))
 }
+
+pub(crate) fn prompts() -> JsonB {
+    crate::finish_json_result(crate::prompts::prompts())
+}
+
+pub(crate) fn prompt(name: &str, version: pgrx::default!(Option<i32>, "NULL")) -> JsonB {
+    crate::finish_json_result(crate::prompts::prompt(name, version))
+}
+
+pub(crate) fn prompt_set(
+    name: &str,
+    template: &str,
+    role: pgrx::default!(Option<&str>, "NULL"),
+    title: pgrx::default!(Option<&str>, "NULL"),
+    description: pgrx::default!(Option<&str>, "NULL"),
+    metadata: pgrx::default!(Option<JsonB>, "NULL"),
+) -> JsonB {
+    crate::finish_json_result(crate::prompts::set(
+        name,
+        template,
+        role,
+        title,
+        description,
+        metadata.as_ref().map(|metadata| &metadata.0),
+    ))
+}
+
+pub(crate) fn prompt_render(
+    name: &str,
+    variables: pgrx::default!(Option<JsonB>, "NULL"),
+    version: pgrx::default!(Option<i32>, "NULL"),
+) -> String {
+    crate::finish_text_result(crate::prompts::render(
+        name,
+        variables.as_ref().map(|variables| &variables.0),
+        version,
+    ))
+}
+
+pub(crate) fn prompt_message(
+    name: &str,
+    variables: pgrx::default!(Option<JsonB>, "NULL"),
+    version: pgrx::default!(Option<i32>, "NULL"),
+) -> JsonB {
+    crate::finish_json_result(crate::prompts::message(
+        name,
+        variables.as_ref().map(|variables| &variables.0),
+        version,
+    ))
+}
+
+pub(crate) fn prompt_delete(name: &str) -> JsonB {
+    crate::finish_json_result(crate::prompts::delete(name))
+}

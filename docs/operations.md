@@ -109,6 +109,7 @@ Treat this as part of your architecture:
 - use `postllm.job_submit(...)`, `postllm.job_poll(...)`, `postllm.job_result(...)`, and `postllm.job_cancel(...)` when you need durable submit/poll/cancel semantics for one request without wiring a separate application queue first.
 - `LISTEN postllm_async_jobs` when you want push-style async job lifecycle events instead of polling; payloads stay compact and include the event name, job id, status, kind, timestamps, and terminal error/result flags without exposing full request or result bodies.
 - use `postllm.conversation_create(...)`, `postllm.conversation_append(...)`, `postllm.conversation_history(...)`, and `postllm.conversation_reply(...)` when you want durable multi-turn transcripts owned by the current role instead of rebuilding chat history in the application on every call.
+- use `postllm.prompt_set(...)`, `postllm.prompt_render(...)`, and `postllm.prompt_message(...)` when prompt assets should live in the database with version history instead of inside application source or ad hoc SQL strings.
 - use `runtime_discover()` and `runtime_ready()` in startup scripts.
 
 ## When it fits

@@ -67,6 +67,15 @@ This page is grouped by domain so you can scan what you need quickly.
 - `postllm.conversation_history(conversation_id bigint) -> jsonb[]`
 - `postllm.conversation_reply(conversation_id bigint, message jsonb default null, model text default null, temperature double precision default 0.2, max_tokens int default null) -> jsonb`
 
+## Prompt registries
+
+- `postllm.prompts() -> jsonb`
+- `postllm.prompt(name text, version int default null) -> jsonb`
+- `postllm.prompt_set(name text, template text, role text default null, title text default null, description text default null, metadata jsonb default null) -> jsonb`
+- `postllm.prompt_render(name text, variables jsonb default null, version int default null) -> text`
+- `postllm.prompt_message(name text, variables jsonb default null, version int default null) -> jsonb`
+- `postllm.prompt_delete(name text) -> jsonb`
+
 ## Structured and tool helpers
 
 - `postllm.function_tool(name text, parameters jsonb, description text default null) -> jsonb`

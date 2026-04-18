@@ -16,6 +16,7 @@ pub(crate) mod interrupt;
 pub(crate) mod jobs;
 pub(crate) mod operator_policy;
 pub(crate) mod permissions;
+pub(crate) mod prompts;
 pub(crate) mod secrets;
 
 use crate::error::{Error, Result};
@@ -184,6 +185,39 @@ pgrx::extension_sql!(
         'Durable multi-turn conversations owned by the submitting role.';
     COMMENT ON TABLE postllm.conversation_messages IS
         'Stored normalized chat messages that belong to a durable postllm conversation.';
+
+    CREATE TABLE postllm.prompt_registries (
+        id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        created_by text NOT NULL,
+        name text NOT NULL,
+        title text,
+        active_version integer NOT NULL DEFAULT 1,
+        UNIQUE (created_by, name)
+    );
+
+    CREATE TABLE postllm.prompt_versions (
+        prompt_id bigint NOT NULL REFERENCES postllm.prompt_registries(id) ON DELETE CASCADE,
+        version integer NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        role text,
+        template text NOT NULL,
+        description text,
+        metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+        PRIMARY KEY (prompt_id, version),
+        CHECK (jsonb_typeof(metadata) = 'object')
+    );
+
+    CREATE INDEX postllm_prompt_registries_created_by_updated_at_idx
+        ON postllm.prompt_registries (created_by, updated_at DESC);
+    CREATE INDEX postllm_prompt_versions_prompt_id_version_idx
+        ON postllm.prompt_versions (prompt_id, version DESC);
+
+    COMMENT ON TABLE postllm.prompt_registries IS
+        'Durable prompt registries owned by the creating role, with one active version pointer.';
+    COMMENT ON TABLE postllm.prompt_versions IS
+        'Append-only prompt template versions and metadata for one durable prompt registry.';
 
     CREATE VIEW postllm.request_metrics AS
     SELECT
@@ -919,6 +953,57 @@ mod postllm {
         max_tokens: default!(Option<i32>, "NULL"),
     ) -> JsonB {
         messages::conversation_reply(conversation_id, message, model, temperature, max_tokens)
+    }
+
+    /// Lists durable prompt registries created by the current role.
+    #[pg_extern]
+    fn prompts() -> JsonB {
+        messages::prompts()
+    }
+
+    /// Returns one durable prompt registry, optionally pinned to a specific version.
+    #[pg_extern]
+    fn prompt(name: &str, version: default!(Option<i32>, "NULL")) -> JsonB {
+        messages::prompt(name, version)
+    }
+
+    /// Appends one new prompt version and marks it active for the current role.
+    #[pg_extern]
+    fn prompt_set(
+        name: &str,
+        template: &str,
+        role: default!(Option<&str>, "NULL"),
+        title: default!(Option<&str>, "NULL"),
+        description: default!(Option<&str>, "NULL"),
+        metadata: default!(Option<JsonB>, "NULL"),
+    ) -> JsonB {
+        messages::prompt_set(name, template, role, title, description, metadata)
+    }
+
+    /// Renders one stored prompt version as text with named variables.
+    #[pg_extern]
+    fn prompt_render(
+        name: &str,
+        variables: default!(Option<JsonB>, "NULL"),
+        version: default!(Option<i32>, "NULL"),
+    ) -> String {
+        messages::prompt_render(name, variables, version)
+    }
+
+    /// Renders one stored prompt version as a chat message when it declares a role.
+    #[pg_extern]
+    fn prompt_message(
+        name: &str,
+        variables: default!(Option<JsonB>, "NULL"),
+        version: default!(Option<i32>, "NULL"),
+    ) -> JsonB {
+        messages::prompt_message(name, variables, version)
+    }
+
+    /// Deletes one durable prompt registry and all of its stored versions for the current role.
+    #[pg_extern]
+    fn prompt_delete(name: &str) -> JsonB {
+        messages::prompt_delete(name)
     }
 
     #[derive(AggregateName)]
@@ -8846,6 +8931,71 @@ mod tests {
             request_body["messages"][0]["content"],
             "What changed in the outage status?"
         );
+    }
+
+    #[pg_test]
+    fn sql_prompt_registry_should_version_render_and_delete() {
+        sql_run(
+            "TRUNCATE postllm.prompt_versions, postllm.prompt_registries RESTART IDENTITY CASCADE",
+        );
+
+        let first = sql_json(
+            r#"SELECT postllm.prompt_set(
+                name => 'incident_summary',
+                template => 'Summarize incident {{ticket}} for {{team}}.',
+                role => 'system',
+                title => 'Incident summary',
+                description => 'Initial wording',
+                metadata => '{"team":"ops"}'::jsonb
+            )"#,
+        );
+        let second = sql_json(
+            r#"SELECT postllm.prompt_set(
+                name => 'incident_summary',
+                template => 'Summarize incident {{ticket}} for {{team}} in one paragraph.',
+                role => 'system',
+                description => 'Short paragraph wording',
+                metadata => '{"team":"ops","style":"short"}'::jsonb
+            )"#,
+        );
+        let listed = sql_json("SELECT postllm.prompts()");
+        let current = sql_json("SELECT postllm.prompt('incident_summary')");
+        let first_version =
+            sql_json("SELECT postllm.prompt(name => 'incident_summary', version => 1)");
+        let rendered = sql_text(
+            r#"SELECT postllm.prompt_render(
+                name => 'incident_summary',
+                variables => '{"ticket":"INC-42","team":"operations"}'::jsonb
+            )"#,
+        );
+        let message = sql_json(
+            r#"SELECT postllm.prompt_message(
+                name => 'incident_summary',
+                variables => '{"ticket":"INC-42","team":"operations"}'::jsonb
+            )"#,
+        );
+        let deleted = sql_json("SELECT postllm.prompt_delete('incident_summary')");
+
+        assert_eq!(first["active_version"], 1);
+        assert_eq!(second["active_version"], 2);
+        assert_eq!(listed.as_array().map(Vec::len), Some(1));
+        assert_eq!(current["title"], "Incident summary");
+        assert_eq!(current["active_version"], 2);
+        assert_eq!(current["current"]["description"], "Short paragraph wording");
+        assert_eq!(current["versions"].as_array().map(Vec::len), Some(2));
+        assert_eq!(first_version["current"]["version"], 1);
+        assert_eq!(first_version["current"]["description"], "Initial wording");
+        assert_eq!(
+            rendered,
+            "Summarize incident INC-42 for operations in one paragraph."
+        );
+        assert_eq!(message["role"], "system");
+        assert_eq!(
+            message["content"],
+            "Summarize incident INC-42 for operations in one paragraph."
+        );
+        assert_eq!(deleted["deleted"], true);
+        assert_eq!(sql_json("SELECT postllm.prompts()"), json!([]));
     }
 
     #[pg_test]

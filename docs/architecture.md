@@ -43,6 +43,7 @@ flowchart TD
 - `src/api/retrieval.rs` implements `api::retrieval`.
 - `src/api/ops.rs` implements `api::ops`.
 - `src/conversations.rs` owns durable conversation/session storage and reply orchestration for multi-turn workflows.
+- `src/prompts.rs` owns durable prompt registries, version storage, and render/message helpers.
 - `src/backend.rs` centralizes request types, capability metadata, and settings model.
 - `src/execution.rs` owns the shared request lifecycle for generation, streaming, embeddings, and reranking.
 - `src/guc.rs` resolves and validates runtime/configuration state.
