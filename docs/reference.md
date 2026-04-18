@@ -58,6 +58,15 @@ This page is grouped by domain so you can scan what you need quickly.
 - `postllm.assistant_parts(parts jsonb[]) -> jsonb`
 - `postllm.messages_agg(message jsonb) -> jsonb[]`
 
+## Conversations
+
+- `postllm.conversations() -> jsonb`
+- `postllm.conversation(conversation_id bigint) -> jsonb`
+- `postllm.conversation_create(title text default null, metadata jsonb default null) -> jsonb`
+- `postllm.conversation_append(conversation_id bigint, message jsonb, metadata jsonb default null) -> jsonb`
+- `postllm.conversation_history(conversation_id bigint) -> jsonb[]`
+- `postllm.conversation_reply(conversation_id bigint, message jsonb default null, model text default null, temperature double precision default 0.2, max_tokens int default null) -> jsonb`
+
 ## Structured and tool helpers
 
 - `postllm.function_tool(name text, parameters jsonb, description text default null) -> jsonb`
@@ -90,6 +99,7 @@ This page is grouped by domain so you can scan what you need quickly.
 - `postllm.job_poll(job_id bigint) -> jsonb`
 - `postllm.job_result(job_id bigint) -> jsonb`
 - `postllm.job_cancel(job_id bigint) -> jsonb`
+- `LISTEN postllm_async_jobs` for lifecycle notifications with compact JSON payloads like `{"event":"started","job_id":42,"status":"running","kind":"complete",...}`
 
 ## Response helpers
 

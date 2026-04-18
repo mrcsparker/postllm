@@ -23,6 +23,7 @@ const JOB_STATUS_RUNNING: &str = "running";
 const JOB_STATUS_SUCCEEDED: &str = "succeeded";
 const JOB_STATUS_FAILED: &str = "failed";
 const JOB_STATUS_CANCELLED: &str = "cancelled";
+pub(crate) const JOB_NOTIFY_CHANNEL: &str = "postllm_async_jobs";
 const SUBPROCESS_CLAIM_FUNCTION: &str = "postllm._async_job_claim_wait";
 const SUBPROCESS_RUN_FUNCTION: &str = "postllm._async_job_run";
 const WORKER_WAIT_FOR_ROW_MS: u64 = 2_000;
@@ -244,6 +245,7 @@ pub(crate) fn submit(kind: &str, request: &Value) -> Result<Value> {
     let job_id = row.get("id").and_then(Value::as_i64).ok_or_else(|| {
         Error::Internal("inserted async job row did not include an id".to_owned())
     })?;
+    emit_job_event(job_id, "submitted");
 
     if let Err(error) = spawn_job_runner(job_id, &submitted_by) {
         mark_job_launch_failure(job_id, &error.to_string())?;
@@ -373,6 +375,10 @@ pub(crate) fn worker_claim(job_id: i64) -> Result<Option<Value>> {
         &[DatumWithOid::from(job_id)],
     )?;
 
+    if claimed.is_some() {
+        emit_job_event(job_id, "started");
+    }
+
     Ok(claimed.map(|value| value.0))
 }
 
@@ -405,7 +411,13 @@ pub(crate) fn worker_finish(
             DatumWithOid::from(error_message),
         ],
     )
-    .map(|updated| updated.is_some())
+    .map(|updated| {
+        let updated = updated.is_some();
+        if updated {
+            emit_job_event(job_id, "finished");
+        }
+        updated
+    })
     .map_err(Error::from)
 }
 
@@ -427,7 +439,13 @@ pub(crate) fn worker_mark_failed(job_id: i64, error_message: &str) -> Result<boo
             DatumWithOid::from(error_message),
         ],
     )
-    .map(|updated| updated.is_some())
+    .map(|updated| {
+        let updated = updated.is_some();
+        if updated {
+            emit_job_event(job_id, "finished");
+        }
+        updated
+    })
     .map_err(Error::from)
 }
 
@@ -631,6 +649,7 @@ fn update_job_cancelled(job_id: i64, submitted_by: &str, message: &str) -> Resul
         ],
     )?;
 
+    emit_job_event(job_id, "finished");
     Ok(())
 }
 
@@ -652,6 +671,7 @@ fn mark_job_launch_failure(job_id: i64, error_message: &str) -> Result<()> {
         ],
     )?;
 
+    emit_job_event(job_id, "finished");
     Ok(())
 }
 
@@ -710,6 +730,53 @@ fn unknown_job_kind(kind: &str) -> Error {
         ),
         "pass kind => 'chat', 'complete', 'embed', or 'rerank'",
     )
+}
+
+fn emit_job_event(job_id: i64, event: &str) {
+    if let Err(error) = notify_job_event(job_id, event) {
+        pgrx::warning!("postllm async job event notify failed for job {job_id}: {error}");
+    }
+}
+
+fn notify_job_event(job_id: i64, event: &str) -> Result<()> {
+    let Some(payload) = job_event_payload(job_id, event)? else {
+        return Ok(());
+    };
+    let payload = payload.to_string();
+
+    Spi::get_one_with_args::<bool>(
+        "SELECT pg_notify($1, $2)",
+        &[
+            DatumWithOid::from(JOB_NOTIFY_CHANNEL),
+            DatumWithOid::from(payload.as_str()),
+        ],
+    )?;
+
+    Ok(())
+}
+
+fn job_event_payload(job_id: i64, event: &str) -> Result<Option<Value>> {
+    Spi::get_one_with_args::<JsonB>(
+        r"
+        SELECT jsonb_build_object(
+            'event', $2,
+            'job_id', id,
+            'kind', kind,
+            'status', status,
+            'worker_pid', worker_pid,
+            'submitted_at', to_jsonb(submitted_at),
+            'started_at', to_jsonb(started_at),
+            'finished_at', to_jsonb(finished_at),
+            'has_result', (result_payload IS NOT NULL),
+            'error_message', error_message
+        )
+        FROM postllm.async_jobs
+        WHERE id = $1
+        ",
+        &[DatumWithOid::from(job_id), DatumWithOid::from(event)],
+    )
+    .map(|row| row.map(|row| row.0))
+    .map_err(Error::from)
 }
 
 fn required_string(object: &serde_json::Map<String, Value>, key: &str) -> Result<String> {

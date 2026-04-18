@@ -150,3 +150,53 @@ pub(crate) fn json_schema(name: &str, schema: JsonB, strict: pgrx::default!(bool
         name, &schema.0, strict,
     ))
 }
+
+pub(crate) fn conversations() -> JsonB {
+    crate::finish_json_result(crate::conversations::conversations())
+}
+
+pub(crate) fn conversation(conversation_id: i64) -> JsonB {
+    crate::finish_json_result(crate::conversations::conversation(conversation_id))
+}
+
+pub(crate) fn conversation_create(
+    title: pgrx::default!(Option<&str>, "NULL"),
+    metadata: pgrx::default!(Option<JsonB>, "NULL"),
+) -> JsonB {
+    crate::finish_json_result(crate::conversations::create(
+        title,
+        metadata.as_ref().map(|metadata| &metadata.0),
+    ))
+}
+
+pub(crate) fn conversation_append(
+    conversation_id: i64,
+    message: JsonB,
+    metadata: pgrx::default!(Option<JsonB>, "NULL"),
+) -> JsonB {
+    crate::finish_json_result(crate::conversations::append(
+        conversation_id,
+        &message.0,
+        metadata.as_ref().map(|metadata| &metadata.0),
+    ))
+}
+
+pub(crate) fn conversation_history(conversation_id: i64) -> Vec<JsonB> {
+    crate::finish_json_array_result(crate::conversations::history(conversation_id))
+}
+
+pub(crate) fn conversation_reply(
+    conversation_id: i64,
+    message: pgrx::default!(Option<JsonB>, "NULL"),
+    model: pgrx::default!(Option<&str>, "NULL"),
+    temperature: pgrx::default!(f64, 0.2),
+    max_tokens: pgrx::default!(Option<i32>, "NULL"),
+) -> JsonB {
+    crate::finish_json_result(crate::conversations::reply(
+        conversation_id,
+        message.as_ref().map(|message| &message.0),
+        model,
+        temperature,
+        max_tokens,
+    ))
+}

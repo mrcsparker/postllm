@@ -6,6 +6,7 @@ pub(crate) mod backend;
 pub(crate) mod candle;
 pub(crate) mod catalog;
 pub(crate) mod client;
+pub(crate) mod conversations;
 pub(crate) mod enum_parser;
 pub(crate) mod error;
 pub(crate) mod execution;
@@ -149,6 +150,40 @@ pgrx::extension_sql!(
         'Durable async postllm jobs submitted for background execution, polling, result fetch, and cancellation.';
     COMMENT ON COLUMN postllm.async_jobs.settings_snapshot IS
         'Stored postllm session settings replayed into the async worker before the job runs.';
+
+    CREATE TABLE postllm.conversations (
+        id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        created_by text NOT NULL,
+        title text,
+        metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+        message_count integer NOT NULL DEFAULT 0,
+        last_message_at timestamptz,
+        CHECK (jsonb_typeof(metadata) = 'object')
+    );
+
+    CREATE TABLE postllm.conversation_messages (
+        conversation_id bigint NOT NULL REFERENCES postllm.conversations(id) ON DELETE CASCADE,
+        message_no integer NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        role text NOT NULL,
+        message jsonb NOT NULL,
+        metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+        PRIMARY KEY (conversation_id, message_no),
+        CHECK (jsonb_typeof(message) = 'object'),
+        CHECK (jsonb_typeof(metadata) = 'object')
+    );
+
+    CREATE INDEX postllm_conversations_created_by_updated_at_idx
+        ON postllm.conversations (created_by, updated_at DESC);
+    CREATE INDEX postllm_conversation_messages_conversation_id_message_no_idx
+        ON postllm.conversation_messages (conversation_id, message_no);
+
+    COMMENT ON TABLE postllm.conversations IS
+        'Durable multi-turn conversations owned by the submitting role.';
+    COMMENT ON TABLE postllm.conversation_messages IS
+        'Stored normalized chat messages that belong to a durable postllm conversation.';
 
     CREATE VIEW postllm.request_metrics AS
     SELECT
@@ -835,6 +870,55 @@ mod postllm {
     #[pg_extern]
     fn json_schema(name: &str, schema: JsonB, strict: default!(bool, true)) -> JsonB {
         messages::json_schema(name, schema, strict)
+    }
+
+    /// Lists durable conversations created by the current role.
+    #[pg_extern]
+    fn conversations() -> JsonB {
+        messages::conversations()
+    }
+
+    /// Returns one durable conversation plus its stored message rows.
+    #[pg_extern]
+    fn conversation(conversation_id: i64) -> JsonB {
+        messages::conversation(conversation_id)
+    }
+
+    /// Creates one durable conversation for multi-turn workflows.
+    #[pg_extern]
+    fn conversation_create(
+        title: default!(Option<&str>, "NULL"),
+        metadata: default!(Option<JsonB>, "NULL"),
+    ) -> JsonB {
+        messages::conversation_create(title, metadata)
+    }
+
+    /// Appends one normalized message to a durable conversation.
+    #[pg_extern]
+    fn conversation_append(
+        conversation_id: i64,
+        message: JsonB,
+        metadata: default!(Option<JsonB>, "NULL"),
+    ) -> JsonB {
+        messages::conversation_append(conversation_id, message, metadata)
+    }
+
+    /// Returns the stored conversation transcript as `jsonb[]` ready for chat-style APIs.
+    #[pg_extern]
+    fn conversation_history(conversation_id: i64) -> Vec<JsonB> {
+        messages::conversation_history(conversation_id)
+    }
+
+    /// Optionally appends one message, runs chat against the stored transcript, and saves the assistant reply.
+    #[pg_extern]
+    fn conversation_reply(
+        conversation_id: i64,
+        message: default!(Option<JsonB>, "NULL"),
+        model: default!(Option<&str>, "NULL"),
+        temperature: default!(f64, 0.2),
+        max_tokens: default!(Option<i32>, "NULL"),
+    ) -> JsonB {
+        messages::conversation_reply(conversation_id, message, model, temperature, max_tokens)
     }
 
     #[derive(AggregateName)]
@@ -4317,7 +4401,7 @@ fn render_template_impl(template: &str, variables: Option<&Value>) -> Result<Str
     Ok(rendered)
 }
 
-fn validate_message_with_argument(message: &Value, argument: &str) -> Result<Value> {
+pub(crate) fn validate_message_with_argument(message: &Value, argument: &str) -> Result<Value> {
     let Some(role) = message.get("role").and_then(Value::as_str) else {
         return Err(Error::invalid_argument(
             &format!("{argument}.role"),
@@ -5042,6 +5126,13 @@ fn finish_json_result(result: Result<Value>) -> JsonB {
 fn finish_vector_result(result: Result<Vec<f32>>) -> Vec<f32> {
     match result {
         Ok(vector) => vector,
+        Err(error) => pgrx::error!("{error}"),
+    }
+}
+
+fn finish_json_array_result(result: Result<Vec<Value>>) -> Vec<JsonB> {
+    match result {
+        Ok(values) => values.into_iter().map(JsonB).collect(),
         Err(error) => pgrx::error!("{error}"),
     }
 }
@@ -5969,6 +6060,94 @@ mod tests {
             "psql command failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn spawn_psql_listener(channel: &str, sleep_seconds: u64) -> Child {
+        let socket_dir = sql_text("SHOW unix_socket_directories")
+            .split(',')
+            .next()
+            .expect("socket directory should be available")
+            .trim()
+            .to_owned();
+        let port = sql_text("SHOW port");
+        let database = sql_text("SELECT current_database()::text");
+        let user = sql_text("SELECT session_user::text");
+
+        Command::new(pg_test_psql_path())
+            .args([
+                "-X",
+                "-q",
+                "-A",
+                "-t",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-h",
+                &socket_dir,
+                "-p",
+                &port,
+                "-U",
+                &user,
+                "-d",
+                &database,
+                "-c",
+                &format!("LISTEN {channel}"),
+                "-c",
+                &format!("SELECT pg_sleep({sleep_seconds})"),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("psql should start a LISTEN session")
+    }
+
+    fn wait_for_psql_output(child: Child) -> String {
+        let output = child
+            .wait_with_output()
+            .expect("psql LISTEN session should exit cleanly");
+
+        assert!(
+            output.status.success(),
+            "psql LISTEN session failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        format!(
+            "{}\n{}",
+            String::from_utf8(output.stdout).expect("psql stdout should be valid UTF-8"),
+            String::from_utf8(output.stderr).expect("psql stderr should be valid UTF-8")
+        )
+    }
+
+    fn decode_psql_notification_payload(encoded: &str) -> Value {
+        serde_json::from_str(encoded).unwrap_or_else(|_| {
+            let escaped = format!("\"{}\"", encoded.replace('\\', "\\\\").replace('"', "\\\""));
+            let decoded = serde_json::from_str::<String>(&escaped)
+                .expect("psql notification payload should decode as a JSON string");
+            serde_json::from_str(&decoded)
+                .expect("decoded psql notification payload should be valid JSON")
+        })
+    }
+
+    fn parse_psql_notification_payloads(output: &str, channel: &str) -> Vec<Value> {
+        output
+            .lines()
+            .filter_map(|line| {
+                let channel_marker = format!("notification \"{channel}\"");
+                if !line.contains(&channel_marker) {
+                    return None;
+                }
+
+                let payload_marker = "payload \"";
+                let payload_start = line.find(payload_marker)? + payload_marker.len();
+                let payload_end = line[payload_start..]
+                    .find("\" received")
+                    .map(|offset| payload_start + offset)?;
+                Some(decode_psql_notification_payload(
+                    &line[payload_start..payload_end],
+                ))
+            })
+            .collect()
     }
 
     fn clear_request_audit_log() {
@@ -8556,6 +8735,120 @@ mod tests {
     }
 
     #[pg_test]
+    fn sql_conversation_primitives_should_store_and_return_history() {
+        sql_run(
+            "TRUNCATE postllm.conversation_messages, postllm.conversations RESTART IDENTITY CASCADE",
+        );
+
+        let created = sql_json(
+            r#"SELECT postllm.conversation_create(
+                title => 'Support thread',
+                metadata => '{"ticket":"INC-42"}'::jsonb
+            )"#,
+        );
+        let conversation_id = created["id"]
+            .as_i64()
+            .expect("created conversation should include an integer id");
+        let first = sql_json(&format!(
+            "SELECT postllm.conversation_append(
+                conversation_id => {conversation_id},
+                message => postllm.system('You are a careful support assistant.')
+            )"
+        ));
+        let second = sql_json(&format!(
+            "SELECT postllm.conversation_append(
+                conversation_id => {conversation_id},
+                message => postllm.user('Summarize the latest outage update.')
+            )"
+        ));
+        let transcript = sql_json(&format!(
+            "SELECT to_jsonb(postllm.conversation_history({conversation_id}))"
+        ));
+        let conversation = sql_json(&format!("SELECT postllm.conversation({conversation_id})"));
+        let listed = sql_json("SELECT postllm.conversations()");
+
+        assert_eq!(created["title"], "Support thread");
+        assert_eq!(created["metadata"]["ticket"], "INC-42");
+        assert_eq!(first["message_no"], 1);
+        assert_eq!(second["message_no"], 2);
+        assert_eq!(transcript[0]["role"], "system");
+        assert_eq!(transcript[1]["role"], "user");
+        assert_eq!(conversation["message_count"], 2);
+        assert_eq!(conversation["messages"][0]["message"]["role"], "system");
+        assert_eq!(
+            conversation["messages"][1]["message"]["content"],
+            "Summarize the latest outage update."
+        );
+        assert_eq!(listed.as_array().map(Vec::len), Some(1));
+    }
+
+    #[pg_test]
+    fn sql_conversation_reply_should_append_assistant_messages() {
+        sql_run(
+            "TRUNCATE postllm.conversation_messages, postllm.conversations RESTART IDENTITY CASCADE",
+        );
+        let (base_url, receiver) = start_mock_json_server(
+            "/v1/chat/completions",
+            r#"{
+                "id":"chatcmpl-conversation-reply",
+                "object":"chat.completion",
+                "choices":[
+                    {
+                        "index":0,
+                        "message":{"role":"assistant","content":"Here is the latest outage summary."},
+                        "finish_reason":"stop"
+                    }
+                ],
+                "usage":{"prompt_tokens":6,"completion_tokens":7,"total_tokens":13}
+            }"#,
+        );
+
+        drop(sql_json(&format!(
+            "SELECT postllm.configure(
+                runtime => 'openai',
+                base_url => {},
+                model => 'mock-conversation-model'
+            )",
+            sql_literal(&base_url)
+        )));
+
+        let created = sql_json("SELECT postllm.conversation_create(title => 'Reply thread')");
+        let conversation_id = created["id"]
+            .as_i64()
+            .expect("created conversation should include an integer id");
+        let reply = sql_json(&format!(
+            "SELECT postllm.conversation_reply(
+                conversation_id => {conversation_id},
+                message => postllm.user('What changed in the outage status?'),
+                temperature => 0.0,
+                max_tokens => 16
+            )"
+        ));
+        let transcript = sql_json(&format!(
+            "SELECT to_jsonb(postllm.conversation_history({conversation_id}))"
+        ));
+        let request_body = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("mock server should capture the conversation reply request");
+
+        assert_eq!(reply["assistant_message"]["message_no"], 2);
+        assert_eq!(
+            reply["assistant_message"]["message"]["content"],
+            "Here is the latest outage summary."
+        );
+        assert_eq!(transcript.as_array().map(Vec::len), Some(2));
+        assert_eq!(
+            transcript[0]["content"],
+            "What changed in the outage status?"
+        );
+        assert_eq!(transcript[1]["role"], "assistant");
+        assert_eq!(
+            request_body["messages"][0]["content"],
+            "What changed in the outage status?"
+        );
+    }
+
+    #[pg_test]
     fn sql_configure_should_update_the_current_session() {
         let configured = sql_json(
             "SELECT postllm.configure(model => 'pg-test-model', embedding_model => 'sentence-transformers/all-MiniLM-L6-v2', timeout_ms => 5000, max_retries => 4, retry_backoff_ms => 750, request_max_concurrency => 6, request_token_budget => 256, request_runtime_budget_ms => 4000, request_spend_budget_microusd => 1500, output_token_price_microusd_per_1k => 500000, candle_offline => true, candle_device => 'cpu', candle_max_input_tokens => 2048, candle_max_concurrency => 2)",
@@ -8809,6 +9102,73 @@ mod tests {
         assert_eq!(cancelled["status"], "cancelled");
         assert_eq!(finished["status"], "cancelled");
         assert_eq!(finished["error_message"], "job was cancelled");
+    }
+
+    #[pg_test]
+    fn sql_job_should_emit_async_notifications() {
+        psql_run("TRUNCATE postllm.async_jobs RESTART IDENTITY");
+        let (base_url, _receiver) = start_mock_json_server(
+            "/v1/chat/completions",
+            r#"{
+                "id":"chatcmpl-async-notify",
+                "object":"chat.completion",
+                "choices":[
+                    {
+                        "index":0,
+                        "message":{"role":"assistant","content":"hello from notify"},
+                        "finish_reason":"stop"
+                    }
+                ],
+                "usage":{"prompt_tokens":4,"completion_tokens":3,"total_tokens":7}
+            }"#,
+        );
+        let listener = spawn_psql_listener(crate::jobs::JOB_NOTIFY_CHANNEL, 2);
+        thread::sleep(Duration::from_millis(150));
+
+        let submitted = psql_json(&format!(
+            "SELECT postllm.configure(
+                runtime => 'openai',
+                base_url => {},
+                model => 'mock-async-notify-model'
+            );
+            SELECT postllm.job_submit(
+                kind => 'complete',
+                request => jsonb_build_object(
+                    'prompt', 'emit lifecycle events',
+                    'temperature', 0.0,
+                    'max_tokens', 12
+                )
+            )",
+            sql_literal(&base_url)
+        ));
+        let job_id = submitted["id"]
+            .as_i64()
+            .expect("submitted async job should include an integer id");
+        let finished = wait_for_async_job_status(job_id, &["succeeded"], 5_000);
+        let listener_output = wait_for_psql_output(listener);
+        let notifications =
+            parse_psql_notification_payloads(&listener_output, crate::jobs::JOB_NOTIFY_CHANNEL);
+
+        assert_eq!(finished["status"], "succeeded");
+        assert!(
+            notifications.len() >= 3,
+            "expected at least three async job notifications, got {notifications:?} from output: {listener_output}"
+        );
+
+        let lifecycle = notifications
+            .into_iter()
+            .filter(|payload| payload["job_id"].as_i64() == Some(job_id))
+            .collect::<Vec<_>>();
+
+        assert_eq!(lifecycle.len(), 3);
+        assert_eq!(lifecycle[0]["event"], "submitted");
+        assert_eq!(lifecycle[0]["status"], "queued");
+        assert_eq!(lifecycle[0]["kind"], "complete");
+        assert_eq!(lifecycle[1]["event"], "started");
+        assert_eq!(lifecycle[1]["status"], "running");
+        assert_eq!(lifecycle[2]["event"], "finished");
+        assert_eq!(lifecycle[2]["status"], "succeeded");
+        assert_eq!(lifecycle[2]["has_result"], true);
     }
 
     #[pg_test]
