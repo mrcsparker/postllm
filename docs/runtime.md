@@ -4,8 +4,8 @@
 
 ## Runtime matrix
 
-- `openai` runtime is OpenAI-compatible HTTP.
-  - Pros: hosted generation, embeddings, reranking, structured outputs, tools, and streaming where the provider supports them across both Chat Completions-style and Responses-style endpoints.
+- `openai` runtime is the hosted HTTP lane.
+  - Pros: OpenAI-compatible generation, embeddings, reranking, structured outputs, tools, and streaming, plus a native Anthropic Messages adapter for generation and streaming.
   - Constraints: network policy applies (`http_allowed_hosts`, `http_allowed_providers`), request latency depends on upstream.
 - `candle` runtime is local in-process Candle inference.
   - Pros: local embeddings, reranking, and starter generation models.
@@ -48,14 +48,36 @@ SELECT postllm.chat_structured(
 
 Hosted tool-calling and streaming are available on runtimes that support those features.
 
-`postllm.base_url` may point at either:
+`postllm.base_url` may point at any of:
 
 - a Chat Completions-style endpoint such as `https://api.openai.com/v1/chat/completions`
 - a Responses-style endpoint such as `https://api.openai.com/v1/responses`
+- an Anthropic Messages endpoint such as `https://api.anthropic.com/v1/messages`
 
 The SQL API stays the same either way. `postllm` translates requests to the provider endpoint shape and normalizes the response back into the existing SQL-facing format.
 
 Hosted embedding calls use the same runtime profile. `postllm.embed(...)` and `postllm.embed_many(...)` derive a sibling `/v1/embeddings` endpoint from `postllm.base_url`, so one hosted profile can serve generation and embeddings together.
+
+Current Anthropic adapter scope:
+
+- Supported: `chat*`, `complete*`, and streaming text generation.
+- Not yet supported: embeddings, reranking, tool-calling, structured outputs, and multimodal inputs.
+
+Example Anthropic configuration:
+
+```sql
+SELECT postllm.configure(
+    runtime => 'openai',
+    base_url => 'https://api.anthropic.com/v1/messages',
+    model => 'claude-3-5-sonnet-latest',
+    api_key_secret => 'anthropic-prod'
+);
+
+SELECT postllm.chat_text(ARRAY[
+    postllm.system('You are concise.'),
+    postllm.user('Explain MVCC in one sentence.')
+]);
+```
 
 ## Candle runtime
 

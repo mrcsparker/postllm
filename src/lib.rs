@@ -6690,22 +6690,49 @@ mod tests {
         status_code: u16,
         response_body: &str,
     ) -> (String, mpsc::Receiver<String>) {
+        start_mock_runtime_discovery_server_at_path(
+            "/v1/chat/completions",
+            status_code,
+            response_body,
+        )
+    }
+
+    fn start_mock_runtime_discovery_server_at_path(
+        path: &str,
+        status_code: u16,
+        response_body: &str,
+    ) -> (String, mpsc::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
         let address = format!(
-            "http://{}/v1/chat/completions",
+            "http://{}{}",
             listener
                 .local_addr()
-                .expect("listener should have a local address")
+                .expect("listener should have a local address"),
+            path
         );
         let (sender, receiver) = mpsc::channel();
+        let expected_path = path
+            .strip_suffix("/chat/completions")
+            .or_else(|| path.strip_suffix("/responses"))
+            .or_else(|| path.strip_suffix("/embeddings"))
+            .or_else(|| path.strip_suffix("/rerank"))
+            .or_else(|| path.strip_suffix("/messages"))
+            .map_or_else(
+                || "/v1/models".to_owned(),
+                |prefix| format!("{prefix}/models"),
+            );
         let response_body = response_body.to_owned();
 
         thread::spawn(move || {
             let (stream, _) = listener
                 .accept()
                 .expect("server should accept one connection");
-            let request_line =
-                read_mock_runtime_discovery_request(stream, status_code, &response_body);
+            let request_line = read_mock_runtime_discovery_request(
+                stream,
+                &expected_path,
+                status_code,
+                &response_body,
+            );
             sender
                 .send(request_line)
                 .expect("request line should be sent back to the test");
@@ -6848,6 +6875,7 @@ mod tests {
 
     fn read_mock_runtime_discovery_request(
         mut stream: TcpStream,
+        expected_path: &str,
         status_code: u16,
         response_body: &str,
     ) -> String {
@@ -6857,7 +6885,7 @@ mod tests {
             .read_line(&mut request_line)
             .expect("request line should read");
         assert!(
-            request_line.starts_with("GET /v1/models HTTP/1.1"),
+            request_line.starts_with(&format!("GET {expected_path} HTTP/1.1")),
             "unexpected request line: {request_line}"
         );
 
@@ -7481,6 +7509,39 @@ mod tests {
         assert_eq!(
             capabilities["features"]["embeddings"]["model"],
             "sentence-transformers/paraphrase-MiniLM-L3-v2"
+        );
+    }
+
+    #[pg_test]
+    fn sql_capabilities_should_surface_anthropic_provider_limits() {
+        drop(sql_json(
+            "SELECT postllm.configure(
+                runtime => 'openai',
+                base_url => 'https://api.anthropic.com/v1/messages',
+                model => 'claude-3-5-sonnet-latest',
+                embedding_model => 'text-embedding-3-small'
+            )",
+        ));
+
+        let capabilities = sql_json("SELECT postllm.capabilities()");
+
+        assert_eq!(capabilities["features"]["chat"]["available"], true);
+        assert_eq!(capabilities["features"]["complete"]["available"], true);
+        assert_eq!(capabilities["features"]["streaming"]["available"], true);
+        assert_eq!(capabilities["features"]["embeddings"]["available"], false);
+        assert_eq!(
+            capabilities["features"]["embeddings"]["reason"],
+            "embeddings are not implemented by the Anthropic adapter"
+        );
+        assert_eq!(capabilities["features"]["reranking"]["available"], false);
+        assert_eq!(capabilities["features"]["tools"]["available"], false);
+        assert_eq!(
+            capabilities["features"]["structured_outputs"]["available"],
+            false
+        );
+        assert_eq!(
+            capabilities["features"]["multimodal_inputs"]["available"],
+            false
         );
     }
 
@@ -9213,6 +9274,50 @@ mod tests {
     }
 
     #[pg_test]
+    fn sql_chat_text_should_support_anthropic_messages_api() {
+        let (base_url, receiver) = start_mock_json_server(
+            "/v1/messages",
+            r#"{
+                "id":"msg_123",
+                "model":"claude-3-5-sonnet-latest",
+                "role":"assistant",
+                "stop_reason":"end_turn",
+                "content":[{"type":"text","text":"Anthropic says hello."}],
+                "usage":{"input_tokens":8,"output_tokens":6}
+            }"#,
+        );
+
+        drop(sql_json(&format!(
+            "SELECT postllm.configure(
+                runtime => 'openai',
+                base_url => {},
+                model => 'claude-3-5-sonnet-latest'
+            )",
+            sql_literal(&base_url)
+        )));
+
+        let response = sql_text(
+            "SELECT postllm.chat_text(ARRAY[
+                postllm.system('You are concise.'),
+                postllm.user('Say hello.')
+            ])",
+        );
+        let request_body = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("mock server should capture the anthropic request");
+
+        assert_eq!(response, "Anthropic says hello.");
+        assert_eq!(request_body["system"], "You are concise.");
+        assert_eq!(request_body["messages"][0]["role"], "user");
+        assert_eq!(request_body["messages"][0]["content"][0]["type"], "text");
+        assert_eq!(
+            request_body["messages"][0]["content"][0]["text"],
+            "Say hello."
+        );
+        assert_eq!(request_body["max_tokens"], 1024);
+    }
+
+    #[pg_test]
     fn sql_embed_should_support_openai_runtime_embeddings() {
         let (embeddings_url, receiver) = start_mock_json_server(
             "/v1/embeddings",
@@ -10022,6 +10127,31 @@ mod tests {
         assert_eq!(discovery["status_code"], 200);
         assert_eq!(discovery["base_url_kind"], "loopback");
         assert_eq!(discovery["execution_environment"], "local");
+    }
+
+    #[pg_test]
+    fn sql_runtime_discover_should_probe_anthropic_models_endpoint() {
+        let (base_url, receiver) = start_mock_runtime_discovery_server_at_path(
+            "/v1/messages",
+            200,
+            r#"{"data":[{"id":"claude-3-5-sonnet-latest"},{"id":"claude-3-5-haiku-latest"}]}"#,
+        );
+        drop(Spi::get_one::<JsonB>(&format!(
+            "SELECT postllm.configure(runtime => 'openai', base_url => {}, model => 'claude-3-5-sonnet-latest')",
+            sql_literal(&base_url)
+        )));
+
+        let discovery = sql_json("SELECT postllm.runtime_discover()");
+        let request_line = receiver
+            .recv()
+            .expect("runtime discovery probe should hit the anthropic mock server");
+
+        assert!(request_line.starts_with("GET /v1/models HTTP/1.1"));
+        assert_eq!(discovery["runtime"], "openai");
+        assert_eq!(discovery["provider"], "anthropic");
+        assert_eq!(discovery["ready"], true);
+        assert_eq!(discovery["model"], "claude-3-5-sonnet-latest");
+        assert_eq!(discovery["model_listed"], true);
     }
 
     #[pg_test]

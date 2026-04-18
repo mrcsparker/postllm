@@ -60,7 +60,7 @@ SELECT postllm.chat_text(ARRAY[
 
 ## Choose your workflow
 
-For hosted inference, keep `runtime => 'openai'` and set a compatible `base_url`. Both `/v1/chat/completions` and `/v1/responses` are supported.
+For hosted inference, keep `runtime => 'openai'` and set a compatible `base_url`. `/v1/chat/completions`, `/v1/responses`, and Anthropic `/v1/messages` are supported.
 
 For local inference, keep `runtime => 'candle'` and choose a supported local model:
 

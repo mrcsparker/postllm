@@ -277,6 +277,7 @@ pub(crate) struct CapabilitySnapshot {
     runtime_setting: Option<String>,
     runtime: Option<Runtime>,
     runtime_error: Option<String>,
+    hosted_provider: Option<String>,
     model: Option<String>,
     embedding_model: Option<String>,
 }
@@ -289,6 +290,8 @@ impl CapabilitySnapshot {
             runtime_setting: Some(settings.runtime.as_str().to_owned()),
             runtime: Some(settings.runtime),
             runtime_error: None,
+            hosted_provider: matches!(settings.runtime, Runtime::OpenAi)
+                .then(|| crate::http_policy::provider_identity(settings)),
             model: Some(settings.model.clone()),
             embedding_model: embedding_model.map(str::to_owned),
         }
@@ -298,15 +301,19 @@ impl CapabilitySnapshot {
     #[must_use]
     pub(crate) fn from_raw(
         runtime_setting: Option<String>,
+        base_url: Option<&str>,
         model: Option<String>,
         embedding_model: Option<String>,
     ) -> Self {
         let (runtime, runtime_error) = parse_runtime_setting(runtime_setting.as_deref());
+        let hosted_provider = matches!(runtime, Some(Runtime::OpenAi))
+            .then(|| crate::http_policy::infer_hosted_provider(base_url));
 
         Self {
             runtime_setting,
             runtime,
             runtime_error,
+            hosted_provider,
             model,
             embedding_model,
         }
@@ -387,6 +394,14 @@ impl CapabilitySnapshot {
     }
 
     fn embedding_support(&self) -> FeatureSupport {
+        if self.hosted_provider.as_deref() == Some(crate::http_policy::PROVIDER_ANTHROPIC) {
+            return FeatureSupport::unsupported(
+                self.runtime_setting.clone(),
+                self.embedding_model.clone(),
+                "embeddings are not implemented by the Anthropic adapter".to_owned(),
+            );
+        }
+
         match (self.runtime, self.embedding_model.as_deref()) {
             (Some(runtime), Some(model)) => {
                 FeatureSupport::available(Some(runtime.as_str().to_owned()), Some(model.to_owned()))
@@ -407,6 +422,14 @@ impl CapabilitySnapshot {
     }
 
     fn reranking_support(&self) -> FeatureSupport {
+        if self.hosted_provider.as_deref() == Some(crate::http_policy::PROVIDER_ANTHROPIC) {
+            return FeatureSupport::unsupported(
+                self.runtime_setting.clone(),
+                self.model.clone(),
+                "reranking is not implemented by the Anthropic adapter".to_owned(),
+            );
+        }
+
         match self.runtime {
             Some(Runtime::OpenAi) => self.model.as_deref().map_or_else(
                 || {
@@ -446,6 +469,14 @@ impl CapabilitySnapshot {
     }
 
     fn multimodal_input_support(&self) -> FeatureSupport {
+        if self.hosted_provider.as_deref() == Some(crate::http_policy::PROVIDER_ANTHROPIC) {
+            return FeatureSupport::unsupported(
+                self.runtime_setting.clone(),
+                self.model.clone(),
+                "multimodal inputs are not implemented by the Anthropic adapter".to_owned(),
+            );
+        }
+
         match (self.runtime, self.model.as_deref()) {
             (Some(Runtime::OpenAi), Some(model)) => {
                 FeatureSupport::available(self.runtime_setting.clone(), Some(model.to_owned()))
@@ -471,6 +502,14 @@ impl CapabilitySnapshot {
     }
 
     fn structured_output_support(&self) -> FeatureSupport {
+        if self.hosted_provider.as_deref() == Some(crate::http_policy::PROVIDER_ANTHROPIC) {
+            return FeatureSupport::unsupported(
+                self.runtime_setting.clone(),
+                self.model.clone(),
+                "structured outputs are not implemented by the Anthropic adapter".to_owned(),
+            );
+        }
+
         match (self.runtime, self.model.as_deref()) {
             (Some(Runtime::OpenAi), Some(model)) => {
                 FeatureSupport::available(self.runtime_setting.clone(), Some(model.to_owned()))
@@ -496,6 +535,14 @@ impl CapabilitySnapshot {
     }
 
     fn tool_support(&self) -> FeatureSupport {
+        if self.hosted_provider.as_deref() == Some(crate::http_policy::PROVIDER_ANTHROPIC) {
+            return FeatureSupport::unsupported(
+                self.runtime_setting.clone(),
+                self.model.clone(),
+                "tool-calling requests are not implemented by the Anthropic adapter".to_owned(),
+            );
+        }
+
         match (self.runtime, self.model.as_deref()) {
             (Some(Runtime::OpenAi), Some(model)) => {
                 FeatureSupport::available(self.runtime_setting.clone(), Some(model.to_owned()))
@@ -1350,6 +1397,7 @@ mod tests {
     fn capability_snapshot_should_surface_invalid_runtime_settings() {
         let snapshot = CapabilitySnapshot::from_raw(
             Some("bogus".to_owned()),
+            Some("https://api.openai.com/v1/chat/completions"),
             Some("llama3.2".to_owned()),
             Some("sentence-transformers/paraphrase-MiniLM-L3-v2".to_owned()),
         )

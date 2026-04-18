@@ -53,7 +53,7 @@ SELECT postllm.configure(
 );
 ```
 
-For hosted inference, `postllm.base_url` may target either a Chat Completions-style endpoint like `/v1/chat/completions` or a Responses-style endpoint like `/v1/responses`. Embedding requests reuse that same profile and derive the sibling `/v1/embeddings` endpoint automatically, so `postllm.model` and `postllm.embedding_model` can live under one hosted session configuration.
+For hosted inference, `postllm.base_url` may target a Chat Completions-style endpoint like `/v1/chat/completions`, a Responses-style endpoint like `/v1/responses`, or an Anthropic Messages endpoint like `/v1/messages`. Embedding requests reuse that same profile and derive the sibling `/v1/embeddings` endpoint automatically where the provider supports embeddings, so `postllm.model` and `postllm.embedding_model` can live under one hosted session configuration.
 
 ## Request guardrails
 
@@ -159,11 +159,11 @@ Examples:
 
 ```sql
 ALTER SYSTEM SET postllm.http_allowed_hosts = 'api.openai.com,host.docker.internal:11434';
-ALTER SYSTEM SET postllm.http_allowed_providers = 'openai,ollama';
+ALTER SYSTEM SET postllm.http_allowed_providers = 'openai,anthropic,ollama';
 ```
 
 `postllm.http_allowed_hosts` accepts `host`, `host:port`, `*.suffix`, and empty (unrestricted).  
-`postllm.http_allowed_providers` accepts `openai`, `ollama`, `openai-compatible`, or `*`.
+`postllm.http_allowed_providers` accepts `openai`, `anthropic`, `ollama`, `openai-compatible`, or `*`.
 
 ## Request audit logging
 

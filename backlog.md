@@ -212,7 +212,7 @@ Issues:
 
 - [x] `PL-051` Add an OpenAI Responses-style adapter in addition to chat-completions compatibility.
 - [x] `PL-052` Add HTTP-backed embeddings so hosted providers fit the same mental model as local Candle embeddings.
-- [ ] `PL-053` Add native adapters for important providers that are not truly OpenAI-compatible.
+- [x] `PL-053` Add native adapters for important providers that are not truly OpenAI-compatible.
 - [ ] `PL-054` Add multimodal inputs and model feature flags for vision, JSON mode, reasoning, and tool use.
 - [ ] `PL-055` Add compatibility tests across Ollama, llama.cpp, OpenAI, and at least one non-OpenAI hosted provider.
 - [ ] `PL-056` Add a real CI matrix across supported PostgreSQL versions and major operating systems.

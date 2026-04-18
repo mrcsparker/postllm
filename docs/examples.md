@@ -256,6 +256,22 @@ SELECT postllm.embed_many(ARRAY[
 
 `postllm` derives the sibling `/v1/embeddings` endpoint from `base_url`, so the same hosted profile can handle chat and embeddings.
 
+### Anthropic chat
+
+```sql
+SELECT postllm.configure(
+    runtime => 'openai',
+    base_url => 'https://api.anthropic.com/v1/messages',
+    model => 'claude-3-5-sonnet-latest',
+    api_key_secret => 'anthropic-prod'
+);
+
+SELECT postllm.chat_text(ARRAY[
+    postllm.system('You are concise.'),
+    postllm.user('Explain VACUUM in one sentence.')
+]);
+```
+
 ### Local embeddings
 
 ```sql

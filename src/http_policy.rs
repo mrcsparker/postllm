@@ -9,6 +9,7 @@ use reqwest::Url;
 
 const PROVIDER_OPENAI: &str = "openai";
 const PROVIDER_OLLAMA: &str = "ollama";
+pub(crate) const PROVIDER_ANTHROPIC: &str = "anthropic";
 const PROVIDER_OPENAI_COMPATIBLE: &str = "openai-compatible";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,8 +39,12 @@ pub(crate) fn summarize(settings: &Settings) -> HostedEndpointSummary {
 pub(crate) fn provider_identity(settings: &Settings) -> String {
     match settings.runtime {
         Runtime::Candle => Runtime::CANDLE.to_owned(),
-        Runtime::OpenAi => infer_openai_provider(settings.base_url.as_deref()),
+        Runtime::OpenAi => infer_hosted_provider(settings.base_url.as_deref()),
     }
+}
+
+pub(crate) fn infer_hosted_provider(base_url: Option<&str>) -> String {
+    infer_openai_provider(base_url)
 }
 
 pub(crate) fn enforce_settings(settings: &Settings) -> Result<()> {
@@ -96,12 +101,16 @@ pub(crate) fn parse_allowed_providers(
     parse_csv_setting(raw)
         .into_iter()
         .map(|entry| match entry.as_str() {
-            "*" | PROVIDER_OPENAI | PROVIDER_OLLAMA | PROVIDER_OPENAI_COMPATIBLE => Ok(entry),
+            "*"
+            | PROVIDER_OPENAI
+            | PROVIDER_OLLAMA
+            | PROVIDER_ANTHROPIC
+            | PROVIDER_OPENAI_COMPATIBLE => Ok(entry),
             _ => Err(Error::invalid_setting(
                 setting_name,
                 format!("contains unsupported provider '{entry}'"),
                 format!(
-                    "SET {setting_name} = '{PROVIDER_OPENAI},{PROVIDER_OLLAMA},{PROVIDER_OPENAI_COMPATIBLE}' or leave it empty"
+                    "SET {setting_name} = '{PROVIDER_OPENAI},{PROVIDER_OLLAMA},{PROVIDER_ANTHROPIC},{PROVIDER_OPENAI_COMPATIBLE}' or leave it empty"
                 ),
             )),
         })
@@ -115,12 +124,20 @@ fn infer_openai_provider(base_url: Option<&str>) -> String {
     let Ok(url) = Url::parse(base_url) else {
         return PROVIDER_OPENAI_COMPATIBLE.to_owned();
     };
+    if url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        == Some("messages")
+    {
+        return PROVIDER_ANTHROPIC.to_owned();
+    }
     let Some(host) = url.host_str() else {
         return PROVIDER_OPENAI_COMPATIBLE.to_owned();
     };
 
     match (host, url.port_or_known_default()) {
         ("api.openai.com", _) => PROVIDER_OPENAI.to_owned(),
+        ("api.anthropic.com", _) => PROVIDER_ANTHROPIC.to_owned(),
         ("127.0.0.1" | "localhost" | "host.docker.internal", Some(11_434)) => {
             PROVIDER_OLLAMA.to_owned()
         }
@@ -143,7 +160,7 @@ fn derive_models_url(base_url: &Url) -> Option<String> {
     }
     if matches!(
         segments.last().map(String::as_str),
-        Some("responses" | "embeddings" | "rerank")
+        Some("responses" | "embeddings" | "rerank" | "messages")
     ) {
         segments.pop();
     }
@@ -271,6 +288,19 @@ mod tests {
     }
 
     #[test]
+    fn summarize_should_derive_anthropic_provider_and_models_url() {
+        let summary = summarize(&settings(Some("https://api.anthropic.com/v1/messages")));
+
+        assert_eq!(summary.provider, "anthropic");
+        assert_eq!(summary.base_url_host.as_deref(), Some("api.anthropic.com"));
+        assert_eq!(summary.base_url_kind, Some("remote"));
+        assert_eq!(
+            summary.discovery_url.as_deref(),
+            Some("https://api.anthropic.com/v1/models")
+        );
+    }
+
+    #[test]
     fn parse_allowed_hosts_should_accept_suffix_and_host_port_entries() {
         let parsed = parse_allowed_hosts(
             Some("*.openai.com,host.docker.internal:11434"),
@@ -288,14 +318,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_allowed_providers_should_accept_anthropic() {
+        let parsed =
+            parse_allowed_providers(Some("openai,anthropic"), "postllm.http_allowed_providers")
+                .expect("provider policy should parse");
+
+        assert_eq!(parsed, vec!["openai".to_owned(), "anthropic".to_owned()]);
+    }
+
+    #[test]
     fn parse_allowed_providers_should_reject_unknown_entries() {
-        let error = parse_allowed_providers(Some("anthropic"), "postllm.http_allowed_providers")
+        let error = parse_allowed_providers(Some("bedrock"), "postllm.http_allowed_providers")
             .expect_err("provider policy should reject unsupported providers");
 
         assert!(
             error
                 .to_string()
-                .contains("contains unsupported provider 'anthropic'")
+                .contains("contains unsupported provider 'bedrock'")
         );
     }
 

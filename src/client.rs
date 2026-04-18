@@ -15,6 +15,8 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
+const ANTHROPIC_API_VERSION: &str = "2023-06-01";
+const ANTHROPIC_DEFAULT_MAX_TOKENS: i32 = 1024;
 const INTERRUPT_POLL_INTERVAL_MS: u64 = 25;
 const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(INTERRUPT_POLL_INTERVAL_MS);
 
@@ -24,6 +26,7 @@ type HttpRequestResult<T> = core::result::Result<T, HttpRequestError>;
 enum HostedEndpointFlavor {
     ChatCompletions,
     Responses,
+    AnthropicMessages,
 }
 
 #[derive(Debug)]
@@ -211,6 +214,7 @@ pub(crate) fn discover_openai_runtime(settings: &crate::backend::Settings) -> Va
     };
 
     let timeout_ms = settings.timeout_ms.min(5_000);
+    let provider = crate::http_policy::provider_identity(settings);
     let client = match Client::builder()
         .timeout(Duration::from_millis(timeout_ms))
         .build()
@@ -236,10 +240,7 @@ pub(crate) fn discover_openai_runtime(settings: &crate::backend::Settings) -> Va
         }
     };
 
-    let mut request = client.get(&discovery_url);
-    if let Some(api_key) = settings.api_key.as_deref() {
-        request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
-    }
+    let request = apply_provider_discovery_headers(client.get(&discovery_url), settings, &provider);
 
     let response = match request.send() {
         Ok(response) => response,
@@ -428,7 +429,7 @@ fn execute_chat_response_once(
         .timeout(Duration::from_millis(settings.timeout_ms))
         .build()
         .map_err(HttpRequestError::Transport)?;
-    let endpoint = hosted_endpoint_flavor(base_url);
+    let endpoint = hosted_endpoint_flavor(settings);
     let payload = build_request_payload_for_endpoint(
         endpoint,
         &settings.model,
@@ -439,14 +440,11 @@ fn execute_chat_response_once(
         tool_choice,
     )
     .map_err(HttpRequestError::Postllm)?;
-    let mut request = client
+    let request = client
         .post(base_url)
         .header(CONTENT_TYPE, "application/json")
         .json(&payload);
-
-    if let Some(api_key) = settings.api_key.as_deref() {
-        request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
-    }
+    let request = apply_provider_request_headers(request, settings, endpoint);
 
     let response = request.send().map_err(HttpRequestError::Transport)?;
     let status = response.status();
@@ -499,18 +497,15 @@ fn execute_chat_stream_response_once(
         .timeout(Duration::from_millis(settings.timeout_ms))
         .build()
         .map_err(HttpRequestError::Transport)?;
-    let endpoint = hosted_endpoint_flavor(base_url);
+    let endpoint = hosted_endpoint_flavor(settings);
     let payload =
         build_stream_request_payload_for_endpoint(endpoint, &settings.model, messages, options)
             .map_err(HttpRequestError::Postllm)?;
-    let mut request = client
+    let request = client
         .post(base_url)
         .header(CONTENT_TYPE, "application/json")
         .json(&payload);
-
-    if let Some(api_key) = settings.api_key.as_deref() {
-        request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
-    }
+    let request = apply_provider_request_headers(request, settings, endpoint);
 
     let response = request.send().map_err(HttpRequestError::Transport)?;
     let status = response.status();
@@ -558,6 +553,13 @@ fn execute_embedding_response_once(
     cancelled: &AtomicBool,
 ) -> HttpRequestResult<Vec<Vec<f32>>> {
     crate::http_policy::enforce_settings(settings).map_err(HttpRequestError::Postllm)?;
+    let endpoint = hosted_endpoint_flavor(settings);
+
+    if endpoint == HostedEndpointFlavor::AnthropicMessages {
+        return Err(HttpRequestError::Postllm(Error::Unsupported(
+            "embeddings are not implemented by the Anthropic adapter".to_owned(),
+        )));
+    }
 
     let Some(base_url) = settings.base_url.as_deref() else {
         return Err(HttpRequestError::Postllm(Error::invalid_setting(
@@ -577,14 +579,11 @@ fn execute_embedding_response_once(
         .build()
         .map_err(HttpRequestError::Transport)?;
     let payload = build_embedding_request_payload(&settings.model, inputs);
-    let mut request = client
+    let request = client
         .post(&embeddings_url)
         .header(CONTENT_TYPE, "application/json")
         .json(&payload);
-
-    if let Some(api_key) = settings.api_key.as_deref() {
-        request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
-    }
+    let request = apply_provider_request_headers(request, settings, endpoint);
 
     let response = request.send().map_err(HttpRequestError::Transport)?;
     let status = response.status();
@@ -610,6 +609,13 @@ fn execute_rerank_response_once(
     cancelled: &AtomicBool,
 ) -> HttpRequestResult<Vec<crate::backend::RerankResult>> {
     crate::http_policy::enforce_settings(settings).map_err(HttpRequestError::Postllm)?;
+    let endpoint = hosted_endpoint_flavor(settings);
+
+    if endpoint == HostedEndpointFlavor::AnthropicMessages {
+        return Err(HttpRequestError::Postllm(Error::Unsupported(
+            "reranking is not implemented by the Anthropic adapter".to_owned(),
+        )));
+    }
 
     let Some(base_url) = settings.base_url.as_deref() else {
         return Err(HttpRequestError::Postllm(Error::invalid_setting(
@@ -628,14 +634,11 @@ fn execute_rerank_response_once(
         .build()
         .map_err(HttpRequestError::Transport)?;
     let payload = build_rerank_request_payload(&settings.model, query, documents, top_n);
-    let mut request = client
+    let request = client
         .post(base_url)
         .header(CONTENT_TYPE, "application/json")
         .json(&payload);
-
-    if let Some(api_key) = settings.api_key.as_deref() {
-        request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
-    }
+    let request = apply_provider_request_headers(request, settings, endpoint);
 
     let response = request.send().map_err(HttpRequestError::Transport)?;
     let status = response.status();
@@ -813,6 +816,14 @@ fn build_request_payload_for_endpoint(
             tools,
             tool_choice,
         ),
+        HostedEndpointFlavor::AnthropicMessages => build_anthropic_request_payload(
+            model,
+            messages,
+            options,
+            response_format,
+            tools,
+            tool_choice,
+        ),
     }
 }
 
@@ -850,6 +861,122 @@ fn build_stream_request_payload(
     }
 
     payload
+}
+
+fn messages_to_anthropic_payload(messages: &[Value]) -> Result<(Option<String>, Vec<Value>)> {
+    let mut system_messages = Vec::new();
+    let mut anthropic_messages = Vec::new();
+
+    for message in messages {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .ok_or(Error::MalformedResponse)?;
+
+        match role {
+            "system" => {
+                system_messages.push(stringify_anthropic_message_content(message.get("content"))?);
+            }
+            "user" | "assistant" => anthropic_messages.push(json!({
+                "role": role,
+                "content": anthropic_message_content(message.get("content"))?,
+            })),
+            "tool" => {
+                return Err(Error::Unsupported(
+                    "tool result messages are not implemented by the Anthropic adapter".to_owned(),
+                ));
+            }
+            _ => return Err(Error::MalformedResponse),
+        }
+
+        if message.get("tool_calls").is_some() {
+            return Err(Error::Unsupported(
+                "assistant tool calls are not implemented by the Anthropic adapter".to_owned(),
+            ));
+        }
+    }
+
+    let system = (!system_messages.is_empty()).then(|| system_messages.join("\n\n"));
+
+    Ok((system, anthropic_messages))
+}
+
+fn anthropic_message_content(content: Option<&Value>) -> Result<Value> {
+    match content.unwrap_or(&Value::Null) {
+        Value::String(text) => Ok(json!([{
+            "type": "text",
+            "text": text,
+        }])),
+        Value::Array(parts) => parts
+            .iter()
+            .map(anthropic_message_part)
+            .collect::<Result<Vec<Value>>>()
+            .map(Value::Array),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::Object(_) => {
+            Err(Error::MalformedResponse)
+        }
+    }
+}
+
+fn anthropic_message_part(part: &Value) -> Result<Value> {
+    let part_type = part
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or(Error::MalformedResponse)?;
+
+    match part_type {
+        "text" => Ok(json!({
+            "type": "text",
+            "text": part
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or(Error::MalformedResponse)?,
+        })),
+        "image_url" => Err(Error::Unsupported(
+            "multimodal inputs are not implemented by the Anthropic adapter".to_owned(),
+        )),
+        _ => Err(Error::MalformedResponse),
+    }
+}
+
+fn stringify_anthropic_message_content(content: Option<&Value>) -> Result<String> {
+    match content.unwrap_or(&Value::Null) {
+        Value::String(text) => Ok(text.clone()),
+        Value::Array(parts) => {
+            let text = parts
+                .iter()
+                .map(|part| {
+                    let part_type = part
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .ok_or(Error::MalformedResponse)?;
+
+                    match part_type {
+                        "text" => part
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                            .ok_or(Error::MalformedResponse),
+                        "image_url" => Err(Error::Unsupported(
+                            "multimodal inputs are not implemented by the Anthropic adapter"
+                                .to_owned(),
+                        )),
+                        _ => Err(Error::MalformedResponse),
+                    }
+                })
+                .collect::<Result<Vec<String>>>()?
+                .join("");
+
+            if text.is_empty() {
+                Err(Error::MalformedResponse)
+            } else {
+                Ok(text)
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::Object(_) => {
+            Err(Error::MalformedResponse)
+        }
+    }
 }
 
 fn derive_embeddings_url(base_url: &str) -> Result<String> {
@@ -913,7 +1040,53 @@ fn build_stream_request_payload_for_endpoint(
 
             Ok(payload)
         }
+        HostedEndpointFlavor::AnthropicMessages => {
+            let mut payload =
+                build_anthropic_request_payload(model, messages, options, None, None, None)?;
+
+            if let Some(object) = payload.as_object_mut() {
+                object.insert("stream".to_owned(), json!(true));
+            }
+
+            Ok(payload)
+        }
     }
+}
+
+fn build_anthropic_request_payload(
+    model: &str,
+    messages: &[Value],
+    options: crate::backend::RequestOptions,
+    response_format: Option<&Value>,
+    tools: Option<&[Value]>,
+    tool_choice: Option<&Value>,
+) -> Result<Value> {
+    if response_format.is_some() {
+        return Err(Error::Unsupported(
+            "structured-output requests are not implemented by the Anthropic adapter".to_owned(),
+        ));
+    }
+    if tools.is_some() || tool_choice.is_some() {
+        return Err(Error::Unsupported(
+            "tool-calling requests are not implemented by the Anthropic adapter".to_owned(),
+        ));
+    }
+
+    let (system, anthropic_messages) = messages_to_anthropic_payload(messages)?;
+    let mut payload = json!({
+        "model": model,
+        "messages": anthropic_messages,
+        "max_tokens": options.max_tokens.unwrap_or(ANTHROPIC_DEFAULT_MAX_TOKENS),
+        "temperature": options.temperature,
+    });
+
+    if let Some(system) = system
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert("system".to_owned(), json!(system));
+    }
+
+    Ok(payload)
 }
 
 fn messages_to_responses_input(messages: &[Value]) -> Result<Vec<Value>> {
@@ -1059,7 +1232,14 @@ fn stringify_message_content(content: Option<&Value>) -> Result<String> {
     }
 }
 
-fn hosted_endpoint_flavor(base_url: &str) -> HostedEndpointFlavor {
+fn hosted_endpoint_flavor(settings: &crate::backend::Settings) -> HostedEndpointFlavor {
+    if crate::http_policy::provider_identity(settings) == crate::http_policy::PROVIDER_ANTHROPIC {
+        return HostedEndpointFlavor::AnthropicMessages;
+    }
+
+    let Some(base_url) = settings.base_url.as_deref() else {
+        return HostedEndpointFlavor::ChatCompletions;
+    };
     let Ok(url) = Url::parse(base_url) else {
         return HostedEndpointFlavor::ChatCompletions;
     };
@@ -1084,6 +1264,7 @@ fn normalize_response_for_endpoint(
     match endpoint {
         HostedEndpointFlavor::ChatCompletions => Ok(response.clone()),
         HostedEndpointFlavor::Responses => normalize_responses_api_response(response),
+        HostedEndpointFlavor::AnthropicMessages => normalize_anthropic_response(response),
     }
 }
 
@@ -1094,7 +1275,119 @@ fn normalize_stream_events_for_endpoint(
     match endpoint {
         HostedEndpointFlavor::ChatCompletions => Ok(events.to_vec()),
         HostedEndpointFlavor::Responses => normalize_responses_stream_events(events),
+        HostedEndpointFlavor::AnthropicMessages => normalize_anthropic_stream_events(events),
     }
+}
+
+fn normalize_anthropic_response(response: &Value) -> Result<Value> {
+    let tool_calls = extract_anthropic_tool_calls(response)?;
+    let content = extract_anthropic_output_text(response).map_or(Value::Null, Value::String);
+    let finish_reason = anthropic_finish_reason(response, !tool_calls.is_empty());
+    let mut message = json!({
+        "role": "assistant",
+        "content": content,
+    });
+
+    if !tool_calls.is_empty()
+        && let Some(object) = message.as_object_mut()
+    {
+        object.insert("tool_calls".to_owned(), Value::Array(tool_calls));
+    }
+
+    Ok(json!({
+        "id": response.get("id").cloned().unwrap_or(Value::Null),
+        "object": "chat.completion",
+        "model": response.get("model").cloned().unwrap_or(Value::Null),
+        "choices": [{
+            "index": 0,
+            "message": message,
+            "finish_reason": finish_reason,
+        }],
+        "usage": anthropic_usage(response),
+    }))
+}
+
+fn normalize_anthropic_stream_events(events: &[Value]) -> Result<Vec<Value>> {
+    let mut normalized = Vec::new();
+    let mut response_id = Value::Null;
+    let mut model = Value::Null;
+
+    for event in events {
+        let event_type =
+            event
+                .get("type")
+                .and_then(Value::as_str)
+                .ok_or(Error::MalformedStream(
+                    "anthropic stream event did not include a type".to_owned(),
+                ))?;
+
+        match event_type {
+            "message_start" => {
+                let Some(message) = event.get("message") else {
+                    return Err(Error::MalformedStream(
+                        "anthropic message_start event did not include a message".to_owned(),
+                    ));
+                };
+                response_id = message.get("id").cloned().unwrap_or(Value::Null);
+                model = message.get("model").cloned().unwrap_or(Value::Null);
+
+                normalized.push(json!({
+                    "id": response_id.clone(),
+                    "object": "chat.completion.chunk",
+                    "model": model.clone(),
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                        },
+                        "finish_reason": Value::Null,
+                    }],
+                }));
+            }
+            "content_block_delta" => {
+                let Some(delta) = event.get("delta") else {
+                    return Err(Error::MalformedStream(
+                        "anthropic content_block_delta event did not include a delta".to_owned(),
+                    ));
+                };
+
+                if delta.get("type").and_then(Value::as_str) == Some("text_delta") {
+                    normalized.push(json!({
+                        "id": response_id.clone(),
+                        "object": "chat.completion.chunk",
+                        "model": model.clone(),
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "content": delta.get("text").cloned().unwrap_or(Value::Null),
+                            },
+                            "finish_reason": Value::Null,
+                        }],
+                    }));
+                }
+            }
+            "message_delta" => normalized.push(json!({
+                "id": response_id.clone(),
+                "object": "chat.completion.chunk",
+                "model": model.clone(),
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": anthropic_stream_finish_reason(event),
+                }],
+                "usage": anthropic_stream_usage(event),
+            })),
+            _ => {}
+        }
+    }
+
+    if normalized.is_empty() {
+        return Err(Error::MalformedStream(
+            "anthropic stream did not contain any text or completion events".to_owned(),
+        ));
+    }
+
+    Ok(normalized)
 }
 
 fn normalize_responses_api_response(response: &Value) -> Result<Value> {
@@ -1312,6 +1605,47 @@ fn extract_responses_tool_calls(response: &Value) -> Result<Vec<Value>> {
         .collect()
 }
 
+fn extract_anthropic_output_text(response: &Value) -> Option<String> {
+    let content = response.get("content").and_then(Value::as_array)?;
+    let text = content
+        .iter()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<String>();
+
+    (!text.is_empty()).then_some(text)
+}
+
+fn extract_anthropic_tool_calls(response: &Value) -> Result<Vec<Value>> {
+    let Some(content) = response.get("content").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+
+    content
+        .iter()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("tool_use"))
+        .map(|part| {
+            let arguments =
+                serde_json::to_string(part.get("input").ok_or(Error::MalformedResponse)?)?;
+
+            Ok(json!({
+                "id": part
+                    .get("id")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "type": "function",
+                "function": {
+                    "name": part
+                        .get("name")
+                        .cloned()
+                        .ok_or(Error::MalformedResponse)?,
+                    "arguments": arguments,
+                }
+            }))
+        })
+        .collect()
+}
+
 fn responses_usage(response: &Value) -> Value {
     let Some(usage) = response.get("usage").and_then(Value::as_object) else {
         return Value::Null;
@@ -1321,6 +1655,26 @@ fn responses_usage(response: &Value) -> Value {
         "prompt_tokens": usage.get("input_tokens").cloned().unwrap_or(Value::Null),
         "completion_tokens": usage.get("output_tokens").cloned().unwrap_or(Value::Null),
         "total_tokens": usage.get("total_tokens").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn anthropic_usage(response: &Value) -> Value {
+    let Some(usage) = response.get("usage").and_then(Value::as_object) else {
+        return Value::Null;
+    };
+    let prompt_tokens = usage.get("input_tokens").cloned().unwrap_or(Value::Null);
+    let completion_tokens = usage.get("output_tokens").cloned().unwrap_or(Value::Null);
+    let total_tokens = prompt_tokens
+        .as_i64()
+        .zip(completion_tokens.as_i64())
+        .map_or(Value::Null, |(prompt, completion)| {
+            Value::from(prompt + completion)
+        });
+
+    json!({
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
     })
 }
 
@@ -1345,6 +1699,27 @@ fn responses_finish_reason(response: &Value, has_tool_calls: bool) -> Value {
         Some(status) => Value::String(status.to_owned()),
         None => Value::Null,
     }
+}
+
+fn anthropic_finish_reason(response: &Value, has_tool_calls: bool) -> Value {
+    if has_tool_calls {
+        return Value::String("tool_calls".to_owned());
+    }
+
+    match response.get("stop_reason").and_then(Value::as_str) {
+        Some("end_turn" | "stop_sequence") => Value::String("stop".to_owned()),
+        Some("max_tokens" | "model_context_window_exceeded") => Value::String("length".to_owned()),
+        Some(reason) => Value::String(reason.to_owned()),
+        None => Value::Null,
+    }
+}
+
+fn anthropic_stream_finish_reason(event: &Value) -> Value {
+    anthropic_finish_reason(event.get("delta").unwrap_or(&Value::Null), false)
+}
+
+fn anthropic_stream_usage(event: &Value) -> Value {
+    anthropic_usage(event)
 }
 
 #[allow(
@@ -1595,6 +1970,51 @@ fn truncate_body(body: &str) -> String {
     truncated
 }
 
+fn apply_provider_request_headers(
+    request: reqwest::blocking::RequestBuilder,
+    settings: &crate::backend::Settings,
+    endpoint: HostedEndpointFlavor,
+) -> reqwest::blocking::RequestBuilder {
+    match endpoint {
+        HostedEndpointFlavor::AnthropicMessages => {
+            let request = if let Some(api_key) = settings.api_key.as_deref() {
+                request.header("x-api-key", api_key)
+            } else {
+                request
+            };
+
+            request.header("anthropic-version", ANTHROPIC_API_VERSION)
+        }
+        HostedEndpointFlavor::ChatCompletions | HostedEndpointFlavor::Responses => {
+            if let Some(api_key) = settings.api_key.as_deref() {
+                request.header(AUTHORIZATION, format!("Bearer {api_key}"))
+            } else {
+                request
+            }
+        }
+    }
+}
+
+fn apply_provider_discovery_headers(
+    request: reqwest::blocking::RequestBuilder,
+    settings: &crate::backend::Settings,
+    provider: &str,
+) -> reqwest::blocking::RequestBuilder {
+    if provider == crate::http_policy::PROVIDER_ANTHROPIC {
+        let request = if let Some(api_key) = settings.api_key.as_deref() {
+            request.header("x-api-key", api_key)
+        } else {
+            request
+        };
+
+        request.header("anthropic-version", ANTHROPIC_API_VERSION)
+    } else if let Some(api_key) = settings.api_key.as_deref() {
+        request.header(AUTHORIZATION, format!("Bearer {api_key}"))
+    } else {
+        request
+    }
+}
+
 fn parse_rerank_response(
     response: &Value,
     documents_len: usize,
@@ -1654,8 +2074,8 @@ fn parse_rerank_response(
 )]
 mod tests {
     use super::{
-        HostedEndpointFlavor, build_embedding_request_payload, build_request_payload,
-        build_request_payload_for_endpoint, build_rerank_request_payload,
+        HostedEndpointFlavor, build_anthropic_request_payload, build_embedding_request_payload,
+        build_request_payload, build_request_payload_for_endpoint, build_rerank_request_payload,
         build_stream_request_payload, chat_response, chat_stream_response, derive_embeddings_url,
         embed_response, extract_text, hosted_endpoint_flavor, normalize_response_for_endpoint,
         normalize_stream_events_for_endpoint, parse_embedding_response, parse_rerank_response,
@@ -1673,6 +2093,8 @@ mod tests {
     #[derive(Debug)]
     struct ObservedRequest {
         authorization: Option<String>,
+        x_api_key: Option<String>,
+        anthropic_version: Option<String>,
         body: Value,
     }
 
@@ -1796,6 +2218,8 @@ mod tests {
 
         let mut content_length = None;
         let mut authorization = None;
+        let mut x_api_key = None;
+        let mut anthropic_version = None;
 
         loop {
             let mut header_line = String::new();
@@ -1829,6 +2253,28 @@ mod tests {
                         .to_owned(),
                 );
             }
+
+            if lower_header.starts_with("x-api-key:") {
+                x_api_key = Some(
+                    header_line
+                        .split_once(':')
+                        .expect("x-api-key header should contain a separator")
+                        .1
+                        .trim()
+                        .to_owned(),
+                );
+            }
+
+            if lower_header.starts_with("anthropic-version:") {
+                anthropic_version = Some(
+                    header_line
+                        .split_once(':')
+                        .expect("anthropic-version header should contain a separator")
+                        .1
+                        .trim()
+                        .to_owned(),
+                );
+            }
         }
 
         let body_length = content_length.expect("request should include content-length");
@@ -1851,6 +2297,8 @@ mod tests {
 
         ObservedRequest {
             authorization,
+            x_api_key,
+            anthropic_version,
             body: serde_json::from_slice(&body).expect("request body should be valid JSON"),
         }
     }
@@ -1891,12 +2339,20 @@ mod tests {
     #[test]
     fn hosted_endpoint_flavor_should_detect_responses_urls() {
         assert_eq!(
-            hosted_endpoint_flavor("https://api.openai.com/v1/responses"),
+            hosted_endpoint_flavor(&settings("https://api.openai.com/v1/responses".to_owned())),
             HostedEndpointFlavor::Responses
         );
         assert_eq!(
-            hosted_endpoint_flavor("https://api.openai.com/v1/chat/completions"),
+            hosted_endpoint_flavor(&settings(
+                "https://api.openai.com/v1/chat/completions".to_owned()
+            )),
             HostedEndpointFlavor::ChatCompletions
+        );
+        assert_eq!(
+            hosted_endpoint_flavor(&settings(
+                "https://api.anthropic.com/v1/messages".to_owned()
+            )),
+            HostedEndpointFlavor::AnthropicMessages
         );
     }
 
@@ -2440,6 +2896,32 @@ mod tests {
     }
 
     #[test]
+    fn build_anthropic_request_payload_should_lift_system_messages() {
+        let payload = build_anthropic_request_payload(
+            "claude-3-5-sonnet-latest",
+            &[
+                json!({"role": "system", "content": "You are concise."}),
+                json!({"role": "user", "content": "Explain MVCC."}),
+            ],
+            request_options(),
+            None,
+            None,
+            None,
+        )
+        .expect("anthropic payload should build");
+
+        assert_eq!(payload["model"], "claude-3-5-sonnet-latest");
+        assert_eq!(payload["system"], "You are concise.");
+        assert_eq!(payload["messages"][0]["role"], "user");
+        assert_eq!(payload["messages"][0]["content"][0]["type"], "text");
+        assert_eq!(
+            payload["messages"][0]["content"][0]["text"],
+            "Explain MVCC."
+        );
+        assert_eq!(payload["max_tokens"], 64);
+    }
+
+    #[test]
     fn normalize_response_for_responses_should_produce_chat_completion_shape() {
         let normalized = normalize_response_for_endpoint(
             HostedEndpointFlavor::Responses,
@@ -2472,6 +2954,37 @@ mod tests {
         assert_eq!(normalized["choices"][0]["finish_reason"], "stop");
         assert_eq!(normalized["usage"]["prompt_tokens"], 7);
         assert_eq!(normalized["usage"]["completion_tokens"], 5);
+    }
+
+    #[test]
+    fn normalize_response_for_anthropic_should_produce_chat_completion_shape() {
+        let normalized = normalize_response_for_endpoint(
+            HostedEndpointFlavor::AnthropicMessages,
+            &json!({
+                "id": "msg_123",
+                "model": "claude-3-5-sonnet-latest",
+                "role": "assistant",
+                "stop_reason": "end_turn",
+                "content": [{
+                    "type": "text",
+                    "text": "hello from anthropic"
+                }],
+                "usage": {
+                    "input_tokens": 7,
+                    "output_tokens": 5
+                }
+            }),
+        )
+        .expect("anthropic payload should normalize");
+
+        assert_eq!(
+            normalized["choices"][0]["message"]["content"],
+            "hello from anthropic"
+        );
+        assert_eq!(normalized["choices"][0]["finish_reason"], "stop");
+        assert_eq!(normalized["usage"]["prompt_tokens"], 7);
+        assert_eq!(normalized["usage"]["completion_tokens"], 5);
+        assert_eq!(normalized["usage"]["total_tokens"], 12);
     }
 
     #[test]
@@ -2533,6 +3046,46 @@ mod tests {
     }
 
     #[test]
+    fn normalize_stream_events_for_anthropic_should_emit_chunk_shapes() {
+        let events = normalize_stream_events_for_endpoint(
+            HostedEndpointFlavor::AnthropicMessages,
+            &[
+                json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_123",
+                        "model": "claude-3-5-sonnet-latest"
+                    }
+                }),
+                json!({
+                    "type": "content_block_delta",
+                    "delta": {
+                        "type": "text_delta",
+                        "text": "hel"
+                    }
+                }),
+                json!({
+                    "type": "message_delta",
+                    "delta": {
+                        "stop_reason": "end_turn"
+                    },
+                    "usage": {
+                        "input_tokens": 7,
+                        "output_tokens": 5
+                    }
+                }),
+            ],
+        )
+        .expect("anthropic stream events should normalize");
+
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0]["choices"][0]["delta"]["role"], "assistant");
+        assert_eq!(events[1]["choices"][0]["delta"]["content"], "hel");
+        assert_eq!(events[2]["choices"][0]["finish_reason"], "stop");
+        assert_eq!(events[2]["usage"]["total_tokens"], 12);
+    }
+
+    #[test]
     fn chat_response_should_normalize_responses_api_output() {
         let (base_url, receiver) = start_mock_server_at_path(
             "/v1/responses",
@@ -2570,6 +3123,56 @@ mod tests {
     }
 
     #[test]
+    fn chat_response_should_normalize_anthropic_messages_output() {
+        let (base_url, receiver) = start_mock_server_at_path(
+            "/v1/messages",
+            r#"{
+                "id":"msg_123",
+                "model":"claude-3-5-sonnet-latest",
+                "role":"assistant",
+                "stop_reason":"end_turn",
+                "content":[{"type":"text","text":"hello from anthropic"}],
+                "usage":{"input_tokens":7,"output_tokens":5}
+            }"#,
+            "application/json",
+        );
+        let messages = vec![
+            json!({"role": "system", "content": "You are concise."}),
+            json!({"role": "user", "content": "Hello"}),
+        ];
+        let settings = SettingsBuilder::new()
+            .runtime(Runtime::OpenAi)
+            .model("claude-3-5-sonnet-latest")
+            .base_url(&base_url)
+            .api_key(Some("secret-token"))
+            .build();
+
+        let response = chat_response(&settings, &messages, request_options(), None, None, None)
+            .expect("anthropic chat request should succeed");
+        let observed_request = receiver
+            .recv()
+            .expect("mock server should observe the request");
+
+        assert_eq!(observed_request.authorization, None);
+        assert_eq!(observed_request.x_api_key.as_deref(), Some("secret-token"));
+        assert_eq!(
+            observed_request.anthropic_version.as_deref(),
+            Some(super::ANTHROPIC_API_VERSION)
+        );
+        assert_eq!(observed_request.body["system"], "You are concise.");
+        assert_eq!(observed_request.body["messages"][0]["role"], "user");
+        assert_eq!(
+            observed_request.body["messages"][0]["content"][0]["text"],
+            "Hello"
+        );
+        assert_eq!(
+            response["choices"][0]["message"]["content"],
+            "hello from anthropic"
+        );
+        assert_eq!(response["usage"]["total_tokens"], 12);
+    }
+
+    #[test]
     fn chat_stream_response_should_normalize_responses_stream_events() {
         let (base_url, receiver) = start_mock_server_at_path(
             "/v1/responses",
@@ -2592,6 +3195,45 @@ mod tests {
         assert_eq!(observed_request.body["stream"], true);
         assert_eq!(observed_request.body["input"][0]["role"], "user");
         assert_eq!(events[0]["choices"][0]["delta"]["content"], "hel");
+        assert_eq!(events[2]["choices"][0]["finish_reason"], "stop");
+    }
+
+    #[test]
+    fn chat_stream_response_should_normalize_anthropic_stream_events() {
+        let (base_url, receiver) = start_mock_server_at_path(
+            "/v1/messages",
+            concat!(
+                "event: message_start\n",
+                "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\",\"model\":\"claude-3-5-sonnet-latest\"}}\n\n",
+                "event: content_block_delta\n",
+                "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hel\"}}\n\n",
+                "event: message_delta\n",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":7,\"output_tokens\":5}}\n\n",
+                "event: message_stop\n",
+                "data: {\"type\":\"message_stop\"}\n\n"
+            ),
+            "text/event-stream",
+        );
+        let settings = SettingsBuilder::new()
+            .runtime(Runtime::OpenAi)
+            .model("claude-3-5-sonnet-latest")
+            .base_url(&base_url)
+            .api_key(Some("secret-token"))
+            .build();
+        let messages = vec![json!({"role": "user", "content": "Hello"})];
+
+        let events = chat_stream_response(&settings, &messages, request_options())
+            .expect("anthropic streaming chat request should succeed");
+        let observed_request = receiver
+            .recv()
+            .expect("mock server should observe the request");
+
+        assert_eq!(observed_request.authorization, None);
+        assert_eq!(observed_request.x_api_key.as_deref(), Some("secret-token"));
+        assert_eq!(observed_request.body["messages"][0]["role"], "user");
+        assert_eq!(observed_request.body["stream"], true);
+        assert_eq!(events[0]["choices"][0]["delta"]["role"], "assistant");
+        assert_eq!(events[1]["choices"][0]["delta"]["content"], "hel");
         assert_eq!(events[2]["choices"][0]["finish_reason"], "stop");
     }
 }

@@ -1003,6 +1003,7 @@ pub(crate) fn apply_async_job_settings_snapshot(snapshot: &Value) -> Result<Valu
 /// Returns a JSON capability snapshot based on the current GUC state.
 #[must_use]
 pub(crate) fn capabilities_snapshot() -> Value {
+    let base_url = string_setting(&POSTLLM_BASE_URL);
     let model = string_setting(&POSTLLM_MODEL)
         .map(|model| resolve_generation_alias(&model).unwrap_or(model));
     let embedding_model = string_setting(&POSTLLM_EMBEDDING_MODEL)
@@ -1010,6 +1011,7 @@ pub(crate) fn capabilities_snapshot() -> Value {
 
     crate::backend::CapabilitySnapshot::from_raw(
         string_setting(&POSTLLM_RUNTIME),
+        base_url.as_deref(),
         model,
         embedding_model,
     )
