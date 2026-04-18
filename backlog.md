@@ -47,6 +47,7 @@ Last manually verified in-repo on 2026-04-05:
 - 2026-04-18 follow-up: `cargo pgrx test pg17 sql_job_ -F pg_test` passed.
 - 2026-04-18 follow-up: `cargo pgrx test pg17 sql_conversation_ -F pg_test` passed.
 - 2026-04-18 follow-up: `cargo pgrx test pg17 sql_prompt_ -F pg_test` passed.
+- 2026-04-18 follow-up: `cargo pgrx test pg17 sql_eval_ -F pg_test` passed.
 
 This snapshot confirms the current hosted `llama-server` Docker lane and the local Candle Docker lane are both green. Keep this section current when backlog status is updated so the plan stays anchored to a real checked state instead of a guessed one.
 
@@ -191,7 +192,7 @@ Issues:
 - [x] `PL-046` Add `NOTIFY` or event-hook support for async completions and streaming progress.
 - [x] `PL-047` Add conversation/session primitives for multi-turn workflows.
 - [x] `PL-048` Add durable prompt registries with versioning and metadata.
-- [ ] `PL-049` Add evaluation datasets and scoring helpers for prompt and model regression testing.
+- [x] `PL-049` Add evaluation datasets and scoring helpers for prompt and model regression testing.
 - [ ] `PL-050` Add benchmark suites for latency, throughput, and memory across runtimes and model sizes.
 
 ## Milestone 8: Provider Coverage, Packaging, And Adoption

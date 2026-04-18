@@ -4,6 +4,7 @@
 )]
 
 pub(crate) mod config;
+pub(crate) mod evals;
 pub(crate) mod inference;
 pub(crate) mod jobs;
 pub(crate) mod messages;

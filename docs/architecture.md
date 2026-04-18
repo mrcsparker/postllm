@@ -20,6 +20,7 @@ flowchart TD
     subgraph "SQL boundary"
         S["src/lib.rs SQL exports"]
         N["api::config"]
+        M["api::evals"]
         O["api::messages"]
         P["api::inference"]
         Q["api::retrieval"]
@@ -27,6 +28,7 @@ flowchart TD
     end
 
     S --> N
+    S --> M
     S --> O
     S --> P
     S --> Q
@@ -36,14 +38,16 @@ flowchart TD
 ## Current boundaries
 
 - `src/lib.rs` registers SQL functions and keeps extension SQL metadata.
-- `src/api/mod.rs` owns API namespacing (`api::config`, `api::messages`, `api::inference`, `api::retrieval`, `api::ops`).
+- `src/api/mod.rs` owns API namespacing (`api::config`, `api::evals`, `api::messages`, `api::inference`, `api::retrieval`, `api::ops`).
 - `src/api/config.rs` implements `api::config`.
+- `src/api/evals.rs` implements `api::evals`.
 - `src/api/messages.rs` implements `api::messages`.
 - `src/api/inference.rs` implements `api::inference`.
 - `src/api/retrieval.rs` implements `api::retrieval`.
 - `src/api/ops.rs` implements `api::ops`.
 - `src/conversations.rs` owns durable conversation/session storage and reply orchestration for multi-turn workflows.
 - `src/prompts.rs` owns durable prompt registries, version storage, and render/message helpers.
+- `src/evals.rs` owns durable evaluation datasets, stored cases, and built-in scoring helpers.
 - `src/backend.rs` centralizes request types, capability metadata, and settings model.
 - `src/execution.rs` owns the shared request lifecycle for generation, streaming, embeddings, and reranking.
 - `src/guc.rs` resolves and validates runtime/configuration state.

@@ -9,6 +9,7 @@ pub(crate) mod client;
 pub(crate) mod conversations;
 pub(crate) mod enum_parser;
 pub(crate) mod error;
+pub(crate) mod evals;
 pub(crate) mod execution;
 pub(crate) mod guc;
 pub(crate) mod http_policy;
@@ -219,6 +220,43 @@ pgrx::extension_sql!(
     COMMENT ON TABLE postllm.prompt_versions IS
         'Append-only prompt template versions and metadata for one durable prompt registry.';
 
+    CREATE TABLE postllm.eval_datasets (
+        id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        created_by text NOT NULL,
+        name text NOT NULL,
+        description text,
+        metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+        UNIQUE (created_by, name),
+        CHECK (jsonb_typeof(metadata) = 'object')
+    );
+
+    CREATE TABLE postllm.eval_cases (
+        dataset_id bigint NOT NULL REFERENCES postllm.eval_datasets(id) ON DELETE CASCADE,
+        case_name text NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        input_payload jsonb NOT NULL,
+        expected_payload jsonb NOT NULL,
+        scorer text NOT NULL DEFAULT 'exact_text',
+        threshold double precision NOT NULL DEFAULT 1.0,
+        metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+        PRIMARY KEY (dataset_id, case_name),
+        CHECK (scorer IN ('exact_text', 'contains_text', 'exact_json', 'json_subset')),
+        CHECK (jsonb_typeof(metadata) = 'object')
+    );
+
+    CREATE INDEX postllm_eval_datasets_created_by_updated_at_idx
+        ON postllm.eval_datasets (created_by, updated_at DESC);
+    CREATE INDEX postllm_eval_cases_dataset_id_updated_at_idx
+        ON postllm.eval_cases (dataset_id, updated_at DESC);
+
+    COMMENT ON TABLE postllm.eval_datasets IS
+        'Durable evaluation datasets owned by the current role for prompt and model regression fixtures.';
+    COMMENT ON TABLE postllm.eval_cases IS
+        'Stored evaluation cases containing inputs, expectations, scorer selection, and metadata.';
+
     CREATE VIEW postllm.request_metrics AS
     SELECT
         id,
@@ -370,7 +408,7 @@ pgrx::extension_sql!(
     reason = "pgrx materializes SQL-facing values as owned Rust types for exported SQL functions"
 )]
 mod postllm {
-    use crate::api::{config, inference, jobs, messages, ops, retrieval};
+    use crate::api::{config, evals, inference, jobs, messages, ops, retrieval};
     use pgrx::iter::TableIterator;
     use pgrx::{
         Aggregate, AggregateName, JsonB, ParallelOption, default, pg_aggregate, pg_extern,
@@ -1004,6 +1042,85 @@ mod postllm {
     #[pg_extern]
     fn prompt_delete(name: &str) -> JsonB {
         messages::prompt_delete(name)
+    }
+
+    /// Lists durable evaluation datasets created by the current role.
+    #[pg_extern]
+    fn eval_datasets() -> JsonB {
+        evals::eval_datasets()
+    }
+
+    /// Returns one durable evaluation dataset plus its stored cases.
+    #[pg_extern]
+    fn eval_dataset(name: &str) -> JsonB {
+        evals::eval_dataset(name)
+    }
+
+    /// Creates or updates one durable evaluation dataset for the current role.
+    #[pg_extern]
+    fn eval_dataset_set(
+        name: &str,
+        description: default!(Option<&str>, "NULL"),
+        metadata: default!(Option<JsonB>, "NULL"),
+    ) -> JsonB {
+        evals::eval_dataset_set(name, description, metadata)
+    }
+
+    /// Deletes one durable evaluation dataset and all of its stored cases.
+    #[pg_extern]
+    fn eval_dataset_delete(name: &str) -> JsonB {
+        evals::eval_dataset_delete(name)
+    }
+
+    /// Returns one stored evaluation case from a durable dataset.
+    #[pg_extern]
+    fn eval_case(dataset_name: &str, case_name: &str) -> JsonB {
+        evals::eval_case(dataset_name, case_name)
+    }
+
+    /// Creates or updates one stored evaluation case in a durable dataset.
+    #[pg_extern]
+    fn eval_case_set(
+        dataset_name: &str,
+        case_name: &str,
+        input_payload: JsonB,
+        expected_payload: JsonB,
+        scorer: default!(&str, "'exact_text'"),
+        threshold: default!(f64, 1.0),
+        metadata: default!(Option<JsonB>, "NULL"),
+    ) -> JsonB {
+        evals::eval_case_set(
+            dataset_name,
+            case_name,
+            input_payload,
+            expected_payload,
+            scorer,
+            threshold,
+            metadata,
+        )
+    }
+
+    /// Deletes one stored evaluation case from a durable dataset.
+    #[pg_extern]
+    fn eval_case_delete(dataset_name: &str, case_name: &str) -> JsonB {
+        evals::eval_case_delete(dataset_name, case_name)
+    }
+
+    /// Scores one actual payload against one expected payload with a built-in scorer.
+    #[pg_extern]
+    fn eval_score(
+        actual: JsonB,
+        expected: JsonB,
+        scorer: default!(&str, "'exact_text'"),
+        threshold: default!(f64, 1.0),
+    ) -> JsonB {
+        evals::eval_score(actual, expected, scorer, threshold)
+    }
+
+    /// Scores one actual payload against the stored expectation for a named evaluation case.
+    #[pg_extern]
+    fn eval_case_score(dataset_name: &str, case_name: &str, actual: JsonB) -> JsonB {
+        evals::eval_case_score(dataset_name, case_name, actual)
     }
 
     #[derive(AggregateName)]
@@ -8996,6 +9113,110 @@ mod tests {
         );
         assert_eq!(deleted["deleted"], true);
         assert_eq!(sql_json("SELECT postllm.prompts()"), json!([]));
+    }
+
+    #[pg_test]
+    fn sql_eval_registry_should_store_score_and_delete_cases() {
+        sql_run("TRUNCATE postllm.eval_cases, postllm.eval_datasets RESTART IDENTITY CASCADE");
+
+        let dataset = sql_json(
+            r#"SELECT postllm.eval_dataset_set(
+                name => 'incident_regressions',
+                description => 'Checks for outage summary wording',
+                metadata => '{"team":"ops"}'::jsonb
+            )"#,
+        );
+        let eval_case = sql_json(
+            r#"SELECT postllm.eval_case_set(
+                dataset_name => 'incident_regressions',
+                case_name => 'summary_mentions_failover',
+                input_payload => '{"ticket":"INC-42","severity":"sev1"}'::jsonb,
+                expected_payload => '"failover"'::jsonb,
+                scorer => 'contains_text',
+                threshold => 1.0,
+                metadata => '{"owner":"release"}'::jsonb
+            )"#,
+        );
+        let listed = sql_json("SELECT postllm.eval_datasets()");
+        let current_dataset = sql_json("SELECT postllm.eval_dataset('incident_regressions')");
+        let current_case = sql_json(
+            "SELECT postllm.eval_case('incident_regressions', 'summary_mentions_failover')",
+        );
+        let scored = sql_json(
+            r#"SELECT postllm.eval_case_score(
+                'incident_regressions',
+                'summary_mentions_failover',
+                '{"choices":[{"message":{"role":"assistant","content":"The incident stabilized after failover to the replica."}}]}'::jsonb
+            )"#,
+        );
+        let deleted_case = sql_json(
+            "SELECT postllm.eval_case_delete('incident_regressions', 'summary_mentions_failover')",
+        );
+        let deleted_dataset =
+            sql_json("SELECT postllm.eval_dataset_delete('incident_regressions')");
+
+        assert_eq!(dataset["name"], "incident_regressions");
+        assert_eq!(dataset["metadata"]["team"], "ops");
+        assert_eq!(eval_case["dataset_name"], "incident_regressions");
+        assert_eq!(eval_case["scorer"], "contains_text");
+        assert_eq!(listed.as_array().map(Vec::len), Some(1));
+        assert_eq!(current_dataset["case_count"], 1);
+        assert_eq!(
+            current_dataset["cases"][0]["name"],
+            "summary_mentions_failover"
+        );
+        assert_eq!(current_case["metadata"]["owner"], "release");
+        assert_eq!(scored["passed"], true);
+        assert_eq!(scored["score"], 1.0);
+        assert_eq!(deleted_case["deleted"], true);
+        assert_eq!(deleted_dataset["deleted"], true);
+        assert_eq!(sql_json("SELECT postllm.eval_datasets()"), json!([]));
+    }
+
+    #[pg_test]
+    fn sql_eval_score_should_support_text_and_json_scorers() {
+        let exact_text = sql_json(
+            r#"SELECT postllm.eval_score(
+                actual => '"ready"'::jsonb,
+                expected => '"ready"'::jsonb
+            )"#,
+        );
+        let contains_text = sql_json(
+            r#"SELECT postllm.eval_score(
+                actual => '{"choices":[{"message":{"role":"assistant","content":"Database recovered after failover."}}]}'::jsonb,
+                expected => '"failover"'::jsonb,
+                scorer => 'contains_text'
+            )"#,
+        );
+        let exact_json = sql_json(
+            r#"SELECT postllm.eval_score(
+                actual => '{"status":"ok","count":2}'::jsonb,
+                expected => '{"status":"ok","count":2}'::jsonb,
+                scorer => 'exact_json'
+            )"#,
+        );
+        let subset_json = sql_json(
+            r#"SELECT postllm.eval_score(
+                actual => '{"status":"ok","nested":{"count":2,"details":"stable"}}'::jsonb,
+                expected => '{"nested":{"count":2}}'::jsonb,
+                scorer => 'json_subset'
+            )"#,
+        );
+        let failed_subset = sql_json(
+            r#"SELECT postllm.eval_score(
+                actual => '{"status":"ok","nested":{"count":2}}'::jsonb,
+                expected => '{"nested":{"count":3}}'::jsonb,
+                scorer => 'json_subset'
+            )"#,
+        );
+
+        assert_eq!(exact_text["passed"], true);
+        assert_eq!(contains_text["passed"], true);
+        assert_eq!(contains_text["scorer"], "contains_text");
+        assert_eq!(exact_json["passed"], true);
+        assert_eq!(subset_json["passed"], true);
+        assert_eq!(failed_subset["passed"], false);
+        assert_eq!(failed_subset["score"], 0.0);
     }
 
     #[pg_test]

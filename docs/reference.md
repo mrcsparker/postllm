@@ -76,6 +76,18 @@ This page is grouped by domain so you can scan what you need quickly.
 - `postllm.prompt_message(name text, variables jsonb default null, version int default null) -> jsonb`
 - `postllm.prompt_delete(name text) -> jsonb`
 
+## Evaluations
+
+- `postllm.eval_datasets() -> jsonb`
+- `postllm.eval_dataset(name text) -> jsonb`
+- `postllm.eval_dataset_set(name text, description text default null, metadata jsonb default null) -> jsonb`
+- `postllm.eval_dataset_delete(name text) -> jsonb`
+- `postllm.eval_case(dataset_name text, case_name text) -> jsonb`
+- `postllm.eval_case_set(dataset_name text, case_name text, input_payload jsonb, expected_payload jsonb, scorer text default 'exact_text', threshold double precision default 1.0, metadata jsonb default null) -> jsonb`
+- `postllm.eval_case_delete(dataset_name text, case_name text) -> jsonb`
+- `postllm.eval_score(actual jsonb, expected jsonb, scorer text default 'exact_text', threshold double precision default 1.0) -> jsonb`
+- `postllm.eval_case_score(dataset_name text, case_name text, actual jsonb) -> jsonb`
+
 ## Structured and tool helpers
 
 - `postllm.function_tool(name text, parameters jsonb, description text default null) -> jsonb`
