@@ -14,7 +14,7 @@ It provides:
 1. Install and run a local extension:
 
 ```bash
-cargo install --locked cargo-pgrx
+cargo install cargo-pgrx --version 0.18.0 --locked
 cargo pgrx init --pg17 download
 cargo pgrx run pg17
 ```

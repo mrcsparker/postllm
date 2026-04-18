@@ -7,7 +7,7 @@ This page is the quickest path to a working `postllm` setup.
 Install PostgreSQL tooling support:
 
 ```bash
-cargo install --locked cargo-pgrx
+cargo install cargo-pgrx --version 0.18.0 --locked
 cargo pgrx init --pg17 download
 ```
 
