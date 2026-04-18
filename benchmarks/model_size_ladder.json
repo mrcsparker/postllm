@@ -1,0 +1,70 @@
+{
+  "name": "model-size-ladder",
+  "description": "Representative small and medium model benchmarks for comparing latency, throughput, and backend RSS.",
+  "scenarios": [
+    {
+      "name": "hosted-small-complete",
+      "runtime": "openai",
+      "model_size": "small",
+      "kind": "complete",
+      "configure": {
+        "runtime": "openai",
+        "model": "${POSTLLM_LLAMA_SMALL_MODEL_ALIAS:-qwen2.5-0.5b-instruct-q2_k}",
+        "base_url": "${POSTLLM_LLAMA_BASE_URL:-http://127.0.0.1:18080/v1/chat/completions}",
+        "timeout_ms": 30000
+      },
+      "statement": "SELECT trim(postllm.complete(prompt => 'Reply with the single word ok.', system_prompt => 'You are a literal benchmark harness. Reply with only ok.', temperature => 0.0, max_tokens => 8));",
+      "warmup": 1,
+      "iterations": 5,
+      "concurrency": 1
+    },
+    {
+      "name": "hosted-medium-complete",
+      "runtime": "openai",
+      "model_size": "medium",
+      "kind": "complete",
+      "configure": {
+        "runtime": "openai",
+        "model": "${POSTLLM_LLAMA_MEDIUM_MODEL_ALIAS:-qwen2.5-1.5b-instruct-q4_k_m}",
+        "base_url": "${POSTLLM_LLAMA_BASE_URL:-http://127.0.0.1:18080/v1/chat/completions}",
+        "timeout_ms": 30000
+      },
+      "statement": "SELECT trim(postllm.complete(prompt => 'Reply with the single word ok.', system_prompt => 'You are a literal benchmark harness. Reply with only ok.', temperature => 0.0, max_tokens => 8));",
+      "warmup": 1,
+      "iterations": 5,
+      "concurrency": 1
+    },
+    {
+      "name": "candle-generation-small",
+      "runtime": "candle",
+      "model_size": "small",
+      "kind": "complete",
+      "configure": {
+        "runtime": "candle",
+        "model": "${POSTLLM_CANDLE_SMALL_GENERATION_MODEL:-Qwen/Qwen2.5-0.5B-Instruct}",
+        "timeout_ms": 120000
+      },
+      "prewarm_sql": "SELECT postllm.model_prewarm(lane => 'generation');",
+      "statement": "SELECT trim(postllm.complete(prompt => 'Reply with the single word ok.', system_prompt => 'You are a literal benchmark harness. Reply with only ok.', temperature => 0.0, max_tokens => 8));",
+      "warmup": 1,
+      "iterations": 5,
+      "concurrency": 1
+    },
+    {
+      "name": "candle-generation-medium",
+      "runtime": "candle",
+      "model_size": "medium",
+      "kind": "complete",
+      "configure": {
+        "runtime": "candle",
+        "model": "${POSTLLM_CANDLE_MEDIUM_GENERATION_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}",
+        "timeout_ms": 120000
+      },
+      "prewarm_sql": "SELECT postllm.model_prewarm(lane => 'generation');",
+      "statement": "SELECT trim(postllm.complete(prompt => 'Reply with the single word ok.', system_prompt => 'You are a literal benchmark harness. Reply with only ok.', temperature => 0.0, max_tokens => 8));",
+      "warmup": 1,
+      "iterations": 5,
+      "concurrency": 1
+    }
+  ]
+}

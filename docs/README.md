@@ -9,6 +9,7 @@ This page gives the quickest route to what you need.
 - [configuration.md](./configuration.md) — GUCs, `configure(...)`, profiles, secrets, permissions, allowlists, model aliases.
 - [examples.md](./examples.md) — Copy-paste SQL flows for common use cases.
 - [operations.md](./operations.md) — Docker, local dev workflows, and smoke tests.
+- [benchmarks.md](./benchmarks.md) — Benchmark suites for latency, throughput, and backend RSS.
 - [architecture.md](./architecture.md) — Internal request flow and ownership map.
 
 ## Reference and advanced usage
@@ -21,7 +22,7 @@ This page gives the quickest route to what you need.
 
 1. [getting-started](./getting-started.md) → [runtime](./runtime.md) → [configuration](./configuration.md)
 2. [architecture](./architecture.md) → [reference](./reference.md)
-3. [examples](./examples.md) → [operations](./operations.md)
+3. [examples](./examples.md) → [operations](./operations.md) → [benchmarks](./benchmarks.md)
 
 ## Minimum reading checklist before first production pilot
 
@@ -34,5 +35,5 @@ This page gives the quickest route to what you need.
 ## Read once, then keep in your working set
 
 - Quick users: keep `getting-started`, `runtime`, and `examples` open.
-- Integrators: add `configuration`, `reference`, and `operations`.
+- Integrators: add `configuration`, `reference`, `operations`, and `benchmarks` when performance sizing matters.
 - Contributors: add `architecture` and `reference` for API ownership.

@@ -96,6 +96,34 @@ env PGRX_HOME=/tmp/postllm-pgrx-home \
   cargo pgrx test pg17
 ```
 
+## Benchmarks
+
+Run the benchmark wrappers from the repository root:
+
+```bash
+bash scripts/bench_llama.sh
+bash scripts/bench_candle.sh
+```
+
+Useful controls:
+
+```bash
+POSTLLM_BENCH_KEEP=1 bash scripts/bench_llama.sh
+POSTLLM_BENCH_SUITE=benchmarks/model_size_ladder.json bash scripts/bench_candle.sh
+POSTLLM_BENCH_OUTPUT_DIR=target/benchmarks/custom bash scripts/bench_candle.sh
+```
+
+- `POSTLLM_BENCH_KEEP=1` leaves the Docker services running after the benchmark finishes.
+- `POSTLLM_BENCH_SUITE` switches from the small runtime matrix to another suite file such as the model-size ladder.
+- `POSTLLM_BENCH_OUTPUT_DIR` chooses where the JSON and Markdown reports are written.
+
+The standalone harness also works against any already-running PostgreSQL instance with `postllm` installed:
+
+```bash
+POSTLLM_BENCH_DSN=postgresql://postgres:postgres@127.0.0.1:5440/postllm \
+python3 scripts/benchmark_suite.py --suite benchmarks/runtime_matrix.json
+```
+
 ## Notes for production use
 
 This extension executes network and inference work inside the PostgreSQL backend process.

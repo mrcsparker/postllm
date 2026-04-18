@@ -1,0 +1,54 @@
+{
+  "name": "runtime-matrix",
+  "description": "Small-model benchmark coverage across hosted and local runtimes.",
+  "scenarios": [
+    {
+      "name": "hosted-small-complete",
+      "runtime": "openai",
+      "model_size": "small",
+      "kind": "complete",
+      "configure": {
+        "runtime": "openai",
+        "model": "${POSTLLM_LLAMA_SMALL_MODEL_ALIAS:-qwen2.5-0.5b-instruct-q2_k}",
+        "base_url": "${POSTLLM_LLAMA_BASE_URL:-http://127.0.0.1:18080/v1/chat/completions}",
+        "timeout_ms": 30000
+      },
+      "statement": "SELECT trim(postllm.complete(prompt => 'Reply with the single word ok.', system_prompt => 'You are a literal benchmark harness. Reply with only ok.', temperature => 0.0, max_tokens => 8));",
+      "warmup": 1,
+      "iterations": 5,
+      "concurrency": 1
+    },
+    {
+      "name": "candle-generation-small",
+      "runtime": "candle",
+      "model_size": "small",
+      "kind": "complete",
+      "configure": {
+        "runtime": "candle",
+        "model": "${POSTLLM_CANDLE_SMALL_GENERATION_MODEL:-Qwen/Qwen2.5-0.5B-Instruct}",
+        "timeout_ms": 120000
+      },
+      "prewarm_sql": "SELECT postllm.model_prewarm(lane => 'generation');",
+      "statement": "SELECT trim(postllm.complete(prompt => 'Reply with the single word ok.', system_prompt => 'You are a literal benchmark harness. Reply with only ok.', temperature => 0.0, max_tokens => 8));",
+      "warmup": 1,
+      "iterations": 5,
+      "concurrency": 1
+    },
+    {
+      "name": "candle-embedding-small",
+      "runtime": "candle",
+      "model_size": "small",
+      "kind": "embed",
+      "configure": {
+        "runtime": "candle",
+        "embedding_model": "${POSTLLM_CANDLE_SMALL_EMBEDDING_MODEL:-sentence-transformers/paraphrase-MiniLM-L3-v2}",
+        "timeout_ms": 120000
+      },
+      "prewarm_sql": "SELECT postllm.model_prewarm(lane => 'embedding');",
+      "statement": "SELECT array_length(postllm.embed('Benchmark embeddings are working.'), 1);",
+      "warmup": 1,
+      "iterations": 5,
+      "concurrency": 1
+    }
+  ]
+}
