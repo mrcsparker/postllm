@@ -58,11 +58,6 @@ impl ExecutionContext {
     ) -> Result<T> {
         self.run_with_settings(
             || {
-                crate::validate_request_controls(
-                    requirements.temperature,
-                    requirements.max_tokens,
-                )?;
-
                 let settings = guc::resolve(model_override)?;
                 let capabilities = backend::CapabilitySnapshot::from_settings(&settings, None);
                 capabilities.require(requirements.feature)?;

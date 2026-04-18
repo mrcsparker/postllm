@@ -20,6 +20,10 @@ pub(crate) const DEFAULT_EMBEDDING_MODEL: &str = "sentence-transformers/paraphra
 pub(crate) const DEFAULT_TIMEOUT_MS: i32 = 30_000;
 pub(crate) const DEFAULT_MAX_RETRIES: i32 = 2;
 pub(crate) const DEFAULT_RETRY_BACKOFF_MS: i32 = 250;
+pub(crate) const DEFAULT_REQUEST_TOKEN_BUDGET: i32 = 0;
+pub(crate) const DEFAULT_REQUEST_RUNTIME_BUDGET_MS: i32 = 0;
+pub(crate) const DEFAULT_REQUEST_SPEND_BUDGET_MICROUSD: i32 = 0;
+pub(crate) const DEFAULT_OUTPUT_TOKEN_PRICE_MICROUSD_PER_1K: i32 = 0;
 pub(crate) const DEFAULT_API_KEY_SECRET: &str = "";
 pub(crate) const DEFAULT_CANDLE_DEVICE: &str = CandleDevice::AUTO;
 pub(crate) const DEFAULT_CANDLE_MAX_INPUT_TOKENS: i32 = 0;
@@ -35,10 +39,23 @@ const PROFILE_MANAGED_STRING_DEFAULTS: [(&str, &str); 7] = [
     ("postllm.api_key_secret", DEFAULT_API_KEY_SECRET),
     ("postllm.candle_device", DEFAULT_CANDLE_DEVICE),
 ];
-const PROFILE_MANAGED_INT_DEFAULTS: [(&str, i32); 5] = [
+const PROFILE_MANAGED_INT_DEFAULTS: [(&str, i32); 9] = [
     ("postllm.timeout_ms", DEFAULT_TIMEOUT_MS),
     ("postllm.max_retries", DEFAULT_MAX_RETRIES),
     ("postllm.retry_backoff_ms", DEFAULT_RETRY_BACKOFF_MS),
+    ("postllm.request_token_budget", DEFAULT_REQUEST_TOKEN_BUDGET),
+    (
+        "postllm.request_runtime_budget_ms",
+        DEFAULT_REQUEST_RUNTIME_BUDGET_MS,
+    ),
+    (
+        "postllm.request_spend_budget_microusd",
+        DEFAULT_REQUEST_SPEND_BUDGET_MICROUSD,
+    ),
+    (
+        "postllm.output_token_price_microusd_per_1k",
+        DEFAULT_OUTPUT_TOKEN_PRICE_MICROUSD_PER_1K,
+    ),
     (
         "postllm.candle_max_input_tokens",
         DEFAULT_CANDLE_MAX_INPUT_TOKENS,
@@ -63,6 +80,10 @@ static POSTLLM_API_KEY_SECRET: GucSetting<Option<CString>> =
 static POSTLLM_TIMEOUT_MS: GucSetting<i32> = GucSetting::<i32>::new(30_000);
 static POSTLLM_MAX_RETRIES: GucSetting<i32> = GucSetting::<i32>::new(2);
 static POSTLLM_RETRY_BACKOFF_MS: GucSetting<i32> = GucSetting::<i32>::new(250);
+static POSTLLM_REQUEST_TOKEN_BUDGET: GucSetting<i32> = GucSetting::<i32>::new(0);
+static POSTLLM_REQUEST_RUNTIME_BUDGET_MS: GucSetting<i32> = GucSetting::<i32>::new(0);
+static POSTLLM_REQUEST_SPEND_BUDGET_MICROUSD: GucSetting<i32> = GucSetting::<i32>::new(0);
+static POSTLLM_OUTPUT_TOKEN_PRICE_MICROUSD_PER_1K: GucSetting<i32> = GucSetting::<i32>::new(0);
 static POSTLLM_HTTP_ALLOWED_HOSTS: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(None);
 static POSTLLM_HTTP_ALLOWED_PROVIDERS: GucSetting<Option<CString>> =
@@ -129,6 +150,10 @@ pub(crate) struct SessionOverrides {
     pub(crate) timeout_ms: Option<i32>,
     pub(crate) max_retries: Option<i32>,
     pub(crate) retry_backoff_ms: Option<i32>,
+    pub(crate) request_token_budget: Option<i32>,
+    pub(crate) request_runtime_budget_ms: Option<i32>,
+    pub(crate) request_spend_budget_microusd: Option<i32>,
+    pub(crate) output_token_price_microusd_per_1k: Option<i32>,
     pub(crate) runtime: Option<String>,
     pub(crate) candle_cache_dir: Option<String>,
     pub(crate) candle_offline: Option<bool>,
@@ -151,6 +176,10 @@ impl SessionOverrides {
         timeout_ms: Option<i32>,
         max_retries: Option<i32>,
         retry_backoff_ms: Option<i32>,
+        request_token_budget: Option<i32>,
+        request_runtime_budget_ms: Option<i32>,
+        request_spend_budget_microusd: Option<i32>,
+        output_token_price_microusd_per_1k: Option<i32>,
         runtime: Option<&str>,
         candle_cache_dir: Option<&str>,
         candle_offline: Option<bool>,
@@ -201,6 +230,26 @@ impl SessionOverrides {
                 retry_backoff_ms,
                 "pass zero to retry immediately or a positive integer number of milliseconds",
             )?,
+            request_token_budget: sanitize_non_negative_int(
+                "request_token_budget",
+                request_token_budget,
+                "pass zero to disable the generation token guardrail or a positive integer token cap",
+            )?,
+            request_runtime_budget_ms: sanitize_non_negative_int(
+                "request_runtime_budget_ms",
+                request_runtime_budget_ms,
+                "pass zero to disable the runtime budget guardrail or a positive integer number of milliseconds",
+            )?,
+            request_spend_budget_microusd: sanitize_non_negative_int(
+                "request_spend_budget_microusd",
+                request_spend_budget_microusd,
+                "pass zero to disable the spend guardrail or a positive integer micro-USD budget",
+            )?,
+            output_token_price_microusd_per_1k: sanitize_non_negative_int(
+                "output_token_price_microusd_per_1k",
+                output_token_price_microusd_per_1k,
+                "pass zero to disable spend-derived token caps or a positive integer micro-USD price per 1k output tokens",
+            )?,
             runtime: sanitize_runtime(runtime)?,
             candle_cache_dir: candle_cache_dir.map(|value| value.trim().to_owned()),
             candle_offline,
@@ -238,6 +287,22 @@ impl SessionOverrides {
             timeout_ms: parse_profile_int(object, "timeout_ms", false)?,
             max_retries: parse_profile_int(object, "max_retries", true)?,
             retry_backoff_ms: parse_profile_int(object, "retry_backoff_ms", true)?,
+            request_token_budget: parse_profile_int(object, "request_token_budget", true)?,
+            request_runtime_budget_ms: parse_profile_int(
+                object,
+                "request_runtime_budget_ms",
+                true,
+            )?,
+            request_spend_budget_microusd: parse_profile_int(
+                object,
+                "request_spend_budget_microusd",
+                true,
+            )?,
+            output_token_price_microusd_per_1k: parse_profile_int(
+                object,
+                "output_token_price_microusd_per_1k",
+                true,
+            )?,
             runtime: parse_profile_runtime(object)?,
             candle_cache_dir: parse_profile_string(object, "candle_cache_dir", false)?,
             candle_offline: parse_profile_bool(object, "candle_offline")?,
@@ -271,6 +336,26 @@ impl SessionOverrides {
         insert_optional_i32(&mut object, "timeout_ms", self.timeout_ms);
         insert_optional_i32(&mut object, "max_retries", self.max_retries);
         insert_optional_i32(&mut object, "retry_backoff_ms", self.retry_backoff_ms);
+        insert_optional_i32(
+            &mut object,
+            "request_token_budget",
+            self.request_token_budget,
+        );
+        insert_optional_i32(
+            &mut object,
+            "request_runtime_budget_ms",
+            self.request_runtime_budget_ms,
+        );
+        insert_optional_i32(
+            &mut object,
+            "request_spend_budget_microusd",
+            self.request_spend_budget_microusd,
+        );
+        insert_optional_i32(
+            &mut object,
+            "output_token_price_microusd_per_1k",
+            self.output_token_price_microusd_per_1k,
+        );
         insert_optional_string(&mut object, "runtime", self.runtime.as_deref());
         insert_optional_string(
             &mut object,
@@ -298,6 +383,7 @@ impl SessionOverrides {
 pub(crate) fn register() {
     register_core_runtime_gucs();
     register_hosted_runtime_gucs();
+    register_request_guardrail_gucs();
     register_candle_runtime_gucs();
     register_audit_gucs();
 }
@@ -398,6 +484,52 @@ fn register_hosted_runtime_gucs() {
         c"Comma-separated provider identities such as openai, ollama, and openai-compatible that limit which hosted provider families postllm may use. Empty means unrestricted.",
         &POSTLLM_HTTP_ALLOWED_PROVIDERS,
         GucContext::Suset,
+        GucFlags::default(),
+    );
+}
+
+fn register_request_guardrail_gucs() {
+    GucRegistry::define_int_guc(
+        c"postllm.request_token_budget",
+        c"Optional cap on generated output tokens per request.",
+        c"When greater than zero, generation-style requests such as chat, complete, and RAG must stay within this many output tokens. If SQL callers omit max_tokens, postllm injects this cap automatically.",
+        &POSTLLM_REQUEST_TOKEN_BUDGET,
+        0,
+        262_144,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"postllm.request_runtime_budget_ms",
+        c"Optional hard cap on effective per-request runtime.",
+        c"When greater than zero, postllm clamps the effective timeout for hosted HTTP and local Candle requests to this many milliseconds even if postllm.timeout_ms is higher.",
+        &POSTLLM_REQUEST_RUNTIME_BUDGET_MS,
+        0,
+        300_000,
+        GucContext::Userset,
+        GucFlags::UNIT_MS,
+    );
+
+    GucRegistry::define_int_guc(
+        c"postllm.request_spend_budget_microusd",
+        c"Optional estimated output-spend cap per generation request.",
+        c"When greater than zero, postllm derives a max_tokens ceiling from postllm.output_token_price_microusd_per_1k and applies it to chat, complete, streaming, and RAG requests.",
+        &POSTLLM_REQUEST_SPEND_BUDGET_MICROUSD,
+        0,
+        i32::MAX,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"postllm.output_token_price_microusd_per_1k",
+        c"Estimated micro-USD price per 1k generated output tokens.",
+        c"Used together with postllm.request_spend_budget_microusd to derive a spend-based max_tokens ceiling for generation requests. Zero disables spend-derived caps.",
+        &POSTLLM_OUTPUT_TOKEN_PRICE_MICROUSD_PER_1K,
+        0,
+        i32::MAX,
+        GucContext::Userset,
         GucFlags::default(),
     );
 }
@@ -650,7 +782,10 @@ fn resolve_rerank_model(runtime: Runtime, model_override: Option<&str>) -> Resul
 }
 
 fn resolve_timeout_ms() -> Result<u64> {
-    let timeout_ms = POSTLLM_TIMEOUT_MS.get();
+    let timeout_ms = effective_timeout_limit(
+        POSTLLM_TIMEOUT_MS.get(),
+        POSTLLM_REQUEST_RUNTIME_BUDGET_MS.get(),
+    );
     if timeout_ms <= 0 {
         return Err(Error::invalid_setting(
             "postllm.timeout_ms",
@@ -666,6 +801,42 @@ fn resolve_timeout_ms() -> Result<u64> {
             "SET postllm.timeout_ms = 30000 or another positive integer",
         )
     })
+}
+
+pub(crate) fn resolve_generation_max_tokens(
+    requested_max_tokens: Option<i32>,
+) -> Result<Option<i32>> {
+    let token_budget = non_zero_setting(POSTLLM_REQUEST_TOKEN_BUDGET.get());
+    let spend_budget = POSTLLM_REQUEST_SPEND_BUDGET_MICROUSD.get();
+    let output_token_price = POSTLLM_OUTPUT_TOKEN_PRICE_MICROUSD_PER_1K.get();
+    let spend_budget_cap = output_token_budget_from_spend(spend_budget, output_token_price)?;
+    let guardrail_cap = min_optional_i32(token_budget, spend_budget_cap);
+
+    match requested_max_tokens {
+        Some(max_tokens) if max_tokens <= 0 => Err(Error::invalid_argument(
+            "max_tokens",
+            format!("must be greater than zero, got {max_tokens}"),
+            "omit max_tokens or pass a positive integer",
+        )),
+        Some(max_tokens) => {
+            if let Some(limit) = guardrail_cap
+                && max_tokens > limit
+            {
+                return Err(Error::invalid_argument(
+                    "max_tokens",
+                    format!(
+                        "must be less than or equal to {limit} because postllm request guardrails are active, got {max_tokens}"
+                    ),
+                    format!(
+                        "pass max_tokens => {limit} or lower, omit max_tokens, or have an operator adjust postllm.request_token_budget/postllm.request_spend_budget_microusd"
+                    ),
+                ));
+            }
+
+            Ok(Some(max_tokens))
+        }
+        None => Ok(guardrail_cap),
+    }
 }
 
 fn resolve_max_retries() -> Result<u32> {
@@ -718,6 +889,10 @@ pub(crate) fn snapshot() -> Value {
         "timeout_ms": POSTLLM_TIMEOUT_MS.get(),
         "max_retries": POSTLLM_MAX_RETRIES.get(),
         "retry_backoff_ms": POSTLLM_RETRY_BACKOFF_MS.get(),
+        "request_token_budget": POSTLLM_REQUEST_TOKEN_BUDGET.get(),
+        "request_runtime_budget_ms": POSTLLM_REQUEST_RUNTIME_BUDGET_MS.get(),
+        "request_spend_budget_microusd": POSTLLM_REQUEST_SPEND_BUDGET_MICROUSD.get(),
+        "output_token_price_microusd_per_1k": POSTLLM_OUTPUT_TOKEN_PRICE_MICROUSD_PER_1K.get(),
         "http_allowed_hosts": string_setting(&POSTLLM_HTTP_ALLOWED_HOSTS),
         "http_allowed_providers": string_setting(&POSTLLM_HTTP_ALLOWED_PROVIDERS),
         "has_api_key": string_setting(&POSTLLM_API_KEY).is_some(),
@@ -765,6 +940,10 @@ pub(crate) fn configure_session(
     timeout_ms: Option<i32>,
     max_retries: Option<i32>,
     retry_backoff_ms: Option<i32>,
+    request_token_budget: Option<i32>,
+    request_runtime_budget_ms: Option<i32>,
+    request_spend_budget_microusd: Option<i32>,
+    output_token_price_microusd_per_1k: Option<i32>,
     runtime: Option<&str>,
     candle_cache_dir: Option<&str>,
     candle_offline: Option<bool>,
@@ -781,6 +960,10 @@ pub(crate) fn configure_session(
         timeout_ms,
         max_retries,
         retry_backoff_ms,
+        request_token_budget,
+        request_runtime_budget_ms,
+        request_spend_budget_microusd,
+        output_token_price_microusd_per_1k,
         runtime,
         candle_cache_dir,
         candle_offline,
@@ -882,6 +1065,30 @@ fn apply_hosted_runtime_overrides(overrides: &SessionOverrides) -> Result<()> {
         "retry_backoff_ms",
         overrides.retry_backoff_ms,
         DEFAULT_RETRY_BACKOFF_MS,
+    )?;
+    apply_optional_i32_override(
+        "postllm.request_token_budget",
+        "request_token_budget",
+        overrides.request_token_budget,
+        DEFAULT_REQUEST_TOKEN_BUDGET,
+    )?;
+    apply_optional_i32_override(
+        "postllm.request_runtime_budget_ms",
+        "request_runtime_budget_ms",
+        overrides.request_runtime_budget_ms,
+        DEFAULT_REQUEST_RUNTIME_BUDGET_MS,
+    )?;
+    apply_optional_i32_override(
+        "postllm.request_spend_budget_microusd",
+        "request_spend_budget_microusd",
+        overrides.request_spend_budget_microusd,
+        DEFAULT_REQUEST_SPEND_BUDGET_MICROUSD,
+    )?;
+    apply_optional_i32_override(
+        "postllm.output_token_price_microusd_per_1k",
+        "output_token_price_microusd_per_1k",
+        overrides.output_token_price_microusd_per_1k,
+        DEFAULT_OUTPUT_TOKEN_PRICE_MICROUSD_PER_1K,
     )?;
 
     Ok(())
@@ -1012,6 +1219,26 @@ pub(crate) fn ensure_active_privileged_settings_allowed() -> Result<()> {
         POSTLLM_RETRY_BACKOFF_MS.get(),
         DEFAULT_RETRY_BACKOFF_MS,
         "retry_backoff_ms",
+    )?;
+    ensure_non_default_i32_setting_allowed(
+        POSTLLM_REQUEST_TOKEN_BUDGET.get(),
+        DEFAULT_REQUEST_TOKEN_BUDGET,
+        "request_token_budget",
+    )?;
+    ensure_non_default_i32_setting_allowed(
+        POSTLLM_REQUEST_RUNTIME_BUDGET_MS.get(),
+        DEFAULT_REQUEST_RUNTIME_BUDGET_MS,
+        "request_runtime_budget_ms",
+    )?;
+    ensure_non_default_i32_setting_allowed(
+        POSTLLM_REQUEST_SPEND_BUDGET_MICROUSD.get(),
+        DEFAULT_REQUEST_SPEND_BUDGET_MICROUSD,
+        "request_spend_budget_microusd",
+    )?;
+    ensure_non_default_i32_setting_allowed(
+        POSTLLM_OUTPUT_TOKEN_PRICE_MICROUSD_PER_1K.get(),
+        DEFAULT_OUTPUT_TOKEN_PRICE_MICROUSD_PER_1K,
+        "output_token_price_microusd_per_1k",
     )?;
     ensure_non_default_i32_setting_allowed(
         POSTLLM_CANDLE_MAX_INPUT_TOKENS.get(),
@@ -1178,7 +1405,7 @@ fn sanitize_candle_device(value: Option<&str>) -> Result<Option<String>> {
 }
 
 fn validate_profile_keys(object: &Map<String, Value>) -> Result<()> {
-    const ALLOWED_KEYS: [&str; 13] = [
+    const ALLOWED_KEYS: [&str; 17] = [
         "base_url",
         "model",
         "embedding_model",
@@ -1186,6 +1413,10 @@ fn validate_profile_keys(object: &Map<String, Value>) -> Result<()> {
         "timeout_ms",
         "max_retries",
         "retry_backoff_ms",
+        "request_token_budget",
+        "request_runtime_budget_ms",
+        "request_spend_budget_microusd",
+        "output_token_price_microusd_per_1k",
         "runtime",
         "candle_cache_dir",
         "candle_offline",
@@ -1258,6 +1489,96 @@ fn parse_profile_int(
         Some(_) => Err(Error::Config(format!(
             "stored profile config field '{key}' must be an integer or null; fix: rewrite it with postllm.profile_set(...)"
         ))),
+    }
+}
+
+fn effective_timeout_limit(timeout_ms: i32, request_runtime_budget_ms: i32) -> i32 {
+    if request_runtime_budget_ms > 0 {
+        timeout_ms.min(request_runtime_budget_ms)
+    } else {
+        timeout_ms
+    }
+}
+
+fn output_token_budget_from_spend(
+    request_spend_budget_microusd: i32,
+    output_token_price_microusd_per_1k: i32,
+) -> Result<Option<i32>> {
+    if request_spend_budget_microusd == 0 {
+        return Ok(None);
+    }
+
+    if output_token_price_microusd_per_1k <= 0 {
+        return Err(Error::invalid_setting(
+            "postllm.output_token_price_microusd_per_1k",
+            "must be greater than zero when postllm.request_spend_budget_microusd is enabled",
+            "SET postllm.output_token_price_microusd_per_1k = 2500 or another positive integer, or SET postllm.request_spend_budget_microusd = 0",
+        ));
+    }
+
+    let derived = (i64::from(request_spend_budget_microusd) * 1_000)
+        / i64::from(output_token_price_microusd_per_1k);
+    if derived <= 0 {
+        return Err(Error::invalid_setting(
+            "postllm.request_spend_budget_microusd",
+            "must be large enough to allow at least one output token at the configured price",
+            "increase postllm.request_spend_budget_microusd or lower postllm.output_token_price_microusd_per_1k",
+        ));
+    }
+
+    i32::try_from(derived)
+        .map(Some)
+        .map_err(|_| {
+            Error::invalid_setting(
+                "postllm.request_spend_budget_microusd",
+                "produced an output-token cap that does not fit in a 32-bit integer",
+                "lower postllm.request_spend_budget_microusd or increase postllm.output_token_price_microusd_per_1k",
+            )
+        })
+}
+
+fn non_zero_setting(value: i32) -> Option<i32> {
+    (value > 0).then_some(value)
+}
+
+fn min_optional_i32(left: Option<i32>, right: Option<i32>) -> Option<i32> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::{effective_timeout_limit, output_token_budget_from_spend};
+
+    #[test]
+    fn effective_timeout_limit_should_apply_runtime_budget_when_present() {
+        assert_eq!(effective_timeout_limit(30_000, 0), 30_000);
+        assert_eq!(effective_timeout_limit(30_000, 5_000), 5_000);
+        assert_eq!(effective_timeout_limit(2_500, 5_000), 2_500);
+    }
+
+    #[test]
+    fn output_token_budget_from_spend_should_require_a_price() {
+        let error = output_token_budget_from_spend(500, 0)
+            .expect_err("spend budgets without a price should be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "postllm is not configured correctly: postllm.output_token_price_microusd_per_1k must be greater than zero when postllm.request_spend_budget_microusd is enabled; fix: SET postllm.output_token_price_microusd_per_1k = 2500 or another positive integer, or SET postllm.request_spend_budget_microusd = 0"
+        );
+    }
+
+    #[test]
+    fn output_token_budget_from_spend_should_derive_one_token_cap() {
+        assert_eq!(
+            output_token_budget_from_spend(750, 250_000)
+                .expect("spend budget should derive a token cap"),
+            Some(3)
+        );
     }
 }
 

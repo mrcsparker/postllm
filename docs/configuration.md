@@ -16,6 +16,10 @@
 - `postllm.timeout_ms`
 - `postllm.max_retries`
 - `postllm.retry_backoff_ms`
+- `postllm.request_token_budget`
+- `postllm.request_runtime_budget_ms`
+- `postllm.request_spend_budget_microusd`
+- `postllm.output_token_price_microusd_per_1k`
 - `postllm.http_allowed_hosts`
 - `postllm.http_allowed_providers`
 - `postllm.candle_cache_dir`
@@ -37,10 +41,41 @@ SELECT postllm.configure(
     timeout_ms => 10000,
     max_retries => 2,
     retry_backoff_ms => 250,
+    request_token_budget => 512,
+    request_runtime_budget_ms => 5000,
+    request_spend_budget_microusd => 2500,
+    output_token_price_microusd_per_1k => 5000,
     runtime => 'openai',
     candle_offline => false,
     candle_device => 'auto'
 );
+```
+
+## Request guardrails
+
+Operators can add coarse per-request limits without changing application SQL:
+
+- `postllm.request_token_budget`
+- `postllm.request_runtime_budget_ms`
+- `postllm.request_spend_budget_microusd`
+- `postllm.output_token_price_microusd_per_1k`
+
+Behavior:
+
+- `request_token_budget` caps generation-style output tokens. If callers omit `max_tokens`, `postllm` injects the guardrail value automatically.
+- `request_runtime_budget_ms` clamps the effective timeout for hosted HTTP requests and local Candle work even when `postllm.timeout_ms` is higher.
+- `request_spend_budget_microusd` derives an output-token ceiling from `output_token_price_microusd_per_1k`.
+
+The spend guardrail is intentionally conservative: it estimates generated output spend for chat, complete, stream, and RAG requests. It does not try to guess hosted prompt-token pricing ahead of time, and local Candle work is still governed primarily by `timeout_ms`, `candle_max_input_tokens`, and `candle_max_concurrency`.
+
+Example:
+
+```sql
+ALTER SYSTEM SET postllm.request_token_budget = 256;
+ALTER SYSTEM SET postllm.request_runtime_budget_ms = 4000;
+ALTER SYSTEM SET postllm.request_spend_budget_microusd = 1200;
+ALTER SYSTEM SET postllm.output_token_price_microusd_per_1k = 300000;
+SELECT pg_reload_conf();
 ```
 
 ## Profiles

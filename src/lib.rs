@@ -349,6 +349,10 @@ mod postllm {
         timeout_ms: default!(Option<i32>, "NULL"),
         max_retries: default!(Option<i32>, "NULL"),
         retry_backoff_ms: default!(Option<i32>, "NULL"),
+        request_token_budget: default!(Option<i32>, "NULL"),
+        request_runtime_budget_ms: default!(Option<i32>, "NULL"),
+        request_spend_budget_microusd: default!(Option<i32>, "NULL"),
+        output_token_price_microusd_per_1k: default!(Option<i32>, "NULL"),
         runtime: default!(Option<&str>, "NULL"),
         candle_cache_dir: default!(Option<&str>, "NULL"),
         candle_offline: default!(Option<bool>, "NULL"),
@@ -365,6 +369,10 @@ mod postllm {
             timeout_ms,
             max_retries,
             retry_backoff_ms,
+            request_token_budget,
+            request_runtime_budget_ms,
+            request_spend_budget_microusd,
+            output_token_price_microusd_per_1k,
             runtime,
             candle_cache_dir,
             candle_offline,
@@ -402,6 +410,10 @@ mod postllm {
         timeout_ms: default!(Option<i32>, "NULL"),
         max_retries: default!(Option<i32>, "NULL"),
         retry_backoff_ms: default!(Option<i32>, "NULL"),
+        request_token_budget: default!(Option<i32>, "NULL"),
+        request_runtime_budget_ms: default!(Option<i32>, "NULL"),
+        request_spend_budget_microusd: default!(Option<i32>, "NULL"),
+        output_token_price_microusd_per_1k: default!(Option<i32>, "NULL"),
         runtime: default!(Option<&str>, "NULL"),
         candle_cache_dir: default!(Option<&str>, "NULL"),
         candle_offline: default!(Option<bool>, "NULL"),
@@ -419,6 +431,10 @@ mod postllm {
             timeout_ms,
             max_retries,
             retry_backoff_ms,
+            request_token_budget,
+            request_runtime_budget_ms,
+            request_spend_budget_microusd,
+            output_token_price_microusd_per_1k,
             runtime,
             candle_cache_dir,
             candle_offline,
@@ -1949,6 +1965,9 @@ fn chat_impl_from_values(
     feature: backend::Feature,
     extensions: ChatRequestExtensions<'_>,
 ) -> Result<Value> {
+    let controls = validate_request_controls(temperature, max_tokens)?;
+    let max_tokens = controls.max_tokens;
+
     execution::ExecutionContext::new(execution::generation_operation(feature, false), || {
         chat_request_audit_payload(messages, temperature, max_tokens, extensions)
     })
@@ -1987,6 +2006,9 @@ fn stream_impl_from_values(
     max_tokens: Option<i32>,
     feature: backend::Feature,
 ) -> Result<Vec<(i32, Option<String>, JsonB)>> {
+    let controls = validate_request_controls(temperature, max_tokens)?;
+    let max_tokens = controls.max_tokens;
+
     execution::ExecutionContext::new(execution::generation_operation(feature, true), || {
         chat_request_audit_payload(
             messages,
@@ -2152,6 +2174,10 @@ fn profile_set_impl(
     timeout_ms: Option<i32>,
     max_retries: Option<i32>,
     retry_backoff_ms: Option<i32>,
+    request_token_budget: Option<i32>,
+    request_runtime_budget_ms: Option<i32>,
+    request_spend_budget_microusd: Option<i32>,
+    output_token_price_microusd_per_1k: Option<i32>,
     runtime: Option<&str>,
     candle_cache_dir: Option<&str>,
     candle_offline: Option<bool>,
@@ -2168,6 +2194,10 @@ fn profile_set_impl(
         timeout_ms,
         max_retries,
         retry_backoff_ms,
+        request_token_budget,
+        request_runtime_budget_ms,
+        request_spend_budget_microusd,
+        output_token_price_microusd_per_1k,
         runtime,
         candle_cache_dir,
         candle_offline,
@@ -4172,7 +4202,15 @@ const fn hex_digit(value: u8) -> char {
     }
 }
 
-pub(crate) fn validate_request_controls(temperature: f64, max_tokens: Option<i32>) -> Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GenerationControls {
+    pub(crate) max_tokens: Option<i32>,
+}
+
+pub(crate) fn validate_request_controls(
+    temperature: f64,
+    max_tokens: Option<i32>,
+) -> Result<GenerationControls> {
     if !(0.0..=2.0).contains(&temperature) {
         return Err(Error::invalid_argument(
             "temperature",
@@ -4181,17 +4219,9 @@ pub(crate) fn validate_request_controls(temperature: f64, max_tokens: Option<i32
         ));
     }
 
-    if let Some(max_tokens) = max_tokens
-        && max_tokens <= 0
-    {
-        return Err(Error::invalid_argument(
-            "max_tokens",
-            format!("must be greater than zero, got {max_tokens}"),
-            "omit max_tokens or pass a positive integer",
-        ));
-    }
+    let max_tokens = guc::resolve_generation_max_tokens(max_tokens)?;
 
-    Ok(())
+    Ok(GenerationControls { max_tokens })
 }
 
 fn validate_messages(messages: &[JsonB]) -> Result<Vec<Value>> {
@@ -6293,75 +6323,59 @@ mod tests {
     #[pg_test]
     fn sql_settings_should_report_defaults() {
         let settings = sql_json("SELECT postllm.settings()");
+        let capabilities = &settings["capabilities"];
 
+        assert_eq!(settings["runtime"], "openai");
         assert_eq!(
-            settings,
-            json!({
-                "runtime": "openai",
-                "base_url": "http://127.0.0.1:11434/v1/chat/completions",
-                "model": "llama3.2",
-                "embedding_model": "sentence-transformers/paraphrase-MiniLM-L3-v2",
-                "timeout_ms": 30_000,
-                "max_retries": 2,
-                "retry_backoff_ms": 250,
-                "http_allowed_hosts": null,
-                "http_allowed_providers": null,
-                "has_api_key": false,
-                "api_key_source": "none",
-                "api_key_secret": null,
-                "candle_cache_dir": null,
-                "candle_offline": false,
-                "candle_device": "auto",
-                "candle_max_input_tokens": 0,
-                "candle_max_concurrency": 0,
-                "capabilities": {
-                    "runtime": "openai",
-                    "model": "llama3.2",
-                    "embedding_model": "sentence-transformers/paraphrase-MiniLM-L3-v2",
-                    "features": {
-                        "chat": {
-                            "available": true,
-                            "runtime": "openai",
-                            "model": "llama3.2",
-                        },
-                        "complete": {
-                            "available": true,
-                            "runtime": "openai",
-                            "model": "llama3.2",
-                        },
-                        "embeddings": {
-                            "available": true,
-                            "runtime": "candle",
-                            "model": "sentence-transformers/paraphrase-MiniLM-L3-v2",
-                        },
-                        "reranking": {
-                            "available": true,
-                            "runtime": "openai",
-                            "model": "llama3.2",
-                        },
-                        "tools": {
-                            "available": true,
-                            "runtime": "openai",
-                            "model": "llama3.2",
-                        },
-                        "structured_outputs": {
-                            "available": true,
-                            "runtime": "openai",
-                            "model": "llama3.2",
-                        },
-                        "streaming": {
-                            "available": true,
-                            "runtime": "openai",
-                            "model": "llama3.2",
-                        },
-                        "multimodal_inputs": {
-                            "available": true,
-                            "runtime": "openai",
-                            "model": "llama3.2",
-                        },
-                    }
-                },
-            })
+            settings["base_url"],
+            "http://127.0.0.1:11434/v1/chat/completions"
+        );
+        assert_eq!(settings["model"], "llama3.2");
+        assert_eq!(
+            settings["embedding_model"],
+            "sentence-transformers/paraphrase-MiniLM-L3-v2"
+        );
+        assert_eq!(settings["timeout_ms"], 30_000);
+        assert_eq!(settings["max_retries"], 2);
+        assert_eq!(settings["retry_backoff_ms"], 250);
+        assert_eq!(settings["request_token_budget"], 0);
+        assert_eq!(settings["request_runtime_budget_ms"], 0);
+        assert_eq!(settings["request_spend_budget_microusd"], 0);
+        assert_eq!(settings["output_token_price_microusd_per_1k"], 0);
+        assert_eq!(settings["http_allowed_hosts"], Value::Null);
+        assert_eq!(settings["http_allowed_providers"], Value::Null);
+        assert_eq!(settings["has_api_key"], false);
+        assert_eq!(settings["api_key_source"], "none");
+        assert_eq!(settings["api_key_secret"], Value::Null);
+        assert_eq!(settings["candle_cache_dir"], Value::Null);
+        assert_eq!(settings["candle_offline"], false);
+        assert_eq!(settings["candle_device"], "auto");
+        assert_eq!(settings["candle_max_input_tokens"], 0);
+        assert_eq!(settings["candle_max_concurrency"], 0);
+        assert_eq!(settings["request_logging"], false);
+        assert_eq!(settings["request_log_redact_inputs"], true);
+        assert_eq!(settings["request_log_redact_outputs"], true);
+
+        assert_eq!(capabilities["runtime"], "openai");
+        assert_eq!(capabilities["model"], "llama3.2");
+        assert_eq!(
+            capabilities["embedding_model"],
+            "sentence-transformers/paraphrase-MiniLM-L3-v2"
+        );
+        assert_eq!(capabilities["features"]["chat"]["available"], true);
+        assert_eq!(capabilities["features"]["chat"]["runtime"], "openai");
+        assert_eq!(capabilities["features"]["complete"]["available"], true);
+        assert_eq!(capabilities["features"]["embeddings"]["runtime"], "candle");
+        assert_eq!(capabilities["features"]["reranking"]["available"], true);
+        assert_eq!(capabilities["features"]["tools"]["available"], true);
+        assert_eq!(
+            capabilities["features"]["structured_outputs"]["available"],
+            true
+        );
+        assert_eq!(capabilities["features"]["streaming"]["available"], true);
+        assert_eq!(
+            capabilities["features"]["multimodal_inputs"]["available"],
+            true
         );
     }
 
@@ -6560,7 +6574,11 @@ mod tests {
                 model => 'staging-chat',
                 timeout_ms => 9000,
                 max_retries => 1,
-                retry_backoff_ms => 50
+                retry_backoff_ms => 50,
+                request_token_budget => 128,
+                request_runtime_budget_ms => 4000,
+                request_spend_budget_microusd => 750,
+                output_token_price_microusd_per_1k => 250000
             )",
         );
         let fetched = sql_json("SELECT postllm.profile('hosted-staging')");
@@ -6578,6 +6596,10 @@ mod tests {
                 "timeout_ms": 9000,
                 "max_retries": 1,
                 "retry_backoff_ms": 50,
+                "request_token_budget": 128,
+                "request_runtime_budget_ms": 4000,
+                "request_spend_budget_microusd": 750,
+                "output_token_price_microusd_per_1k": 250000,
             })
         );
         assert_eq!(fetched["name"], "hosted-staging");
@@ -6593,6 +6615,10 @@ mod tests {
         assert_eq!(applied["timeout_ms"], 9000);
         assert_eq!(applied["max_retries"], 1);
         assert_eq!(applied["retry_backoff_ms"], 50);
+        assert_eq!(applied["request_token_budget"], 128);
+        assert_eq!(applied["request_runtime_budget_ms"], 4000);
+        assert_eq!(applied["request_spend_budget_microusd"], 750);
+        assert_eq!(applied["output_token_price_microusd_per_1k"], 250000);
         assert_eq!(applied["api_key_source"], "none");
         assert_eq!(applied["api_key_secret"], Value::Null);
     }
@@ -6603,6 +6629,10 @@ mod tests {
             "SELECT postllm.configure(
                 runtime => 'candle',
                 model => 'Qwen/Qwen2.5-0.5B-Instruct',
+                request_token_budget => 64,
+                request_runtime_budget_ms => 5000,
+                request_spend_budget_microusd => 2500,
+                output_token_price_microusd_per_1k => 1000,
                 candle_offline => true,
                 candle_device => 'cpu',
                 candle_max_input_tokens => 512,
@@ -6633,6 +6663,10 @@ mod tests {
         assert_eq!(applied["has_api_key"], false);
         assert_eq!(applied["api_key_source"], "none");
         assert_eq!(applied["api_key_secret"], Value::Null);
+        assert_eq!(applied["request_token_budget"], 0);
+        assert_eq!(applied["request_runtime_budget_ms"], 0);
+        assert_eq!(applied["request_spend_budget_microusd"], 0);
+        assert_eq!(applied["output_token_price_microusd_per_1k"], 0);
         assert_eq!(applied["candle_offline"], false);
         assert_eq!(applied["candle_device"], "auto");
         assert_eq!(applied["candle_max_input_tokens"], 0);
@@ -8280,7 +8314,7 @@ mod tests {
     #[pg_test]
     fn sql_configure_should_update_the_current_session() {
         let configured = sql_json(
-            "SELECT postllm.configure(model => 'pg-test-model', embedding_model => 'sentence-transformers/all-MiniLM-L6-v2', timeout_ms => 5000, max_retries => 4, retry_backoff_ms => 750, candle_offline => true, candle_device => 'cpu', candle_max_input_tokens => 2048, candle_max_concurrency => 2)",
+            "SELECT postllm.configure(model => 'pg-test-model', embedding_model => 'sentence-transformers/all-MiniLM-L6-v2', timeout_ms => 5000, max_retries => 4, retry_backoff_ms => 750, request_token_budget => 256, request_runtime_budget_ms => 4000, request_spend_budget_microusd => 1500, output_token_price_microusd_per_1k => 500000, candle_offline => true, candle_device => 'cpu', candle_max_input_tokens => 2048, candle_max_concurrency => 2)",
         );
 
         assert_eq!(configured["model"], "pg-test-model");
@@ -8291,10 +8325,99 @@ mod tests {
         assert_eq!(configured["timeout_ms"], 5_000);
         assert_eq!(configured["max_retries"], 4);
         assert_eq!(configured["retry_backoff_ms"], 750);
+        assert_eq!(configured["request_token_budget"], 256);
+        assert_eq!(configured["request_runtime_budget_ms"], 4_000);
+        assert_eq!(configured["request_spend_budget_microusd"], 1_500);
+        assert_eq!(configured["output_token_price_microusd_per_1k"], 500_000);
         assert_eq!(configured["candle_offline"], true);
         assert_eq!(configured["candle_device"], "cpu");
         assert_eq!(configured["candle_max_input_tokens"], 2_048);
         assert_eq!(configured["candle_max_concurrency"], 2);
+    }
+
+    #[pg_test]
+    fn sql_chat_should_inject_max_tokens_from_request_token_budget() {
+        let (base_url, receiver) = start_mock_json_server(
+            "/v1/chat/completions",
+            r#"{
+                "id":"chatcmpl-budget",
+                "object":"chat.completion",
+                "choices":[
+                    {
+                        "index":0,
+                        "message":{"role":"assistant","content":"guardrail applied"},
+                        "finish_reason":"stop"
+                    }
+                ],
+                "usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}
+            }"#,
+        );
+
+        drop(sql_json(&format!(
+            "SELECT postllm.configure(
+                runtime => 'openai',
+                base_url => {},
+                model => 'mock-budget-model',
+                request_token_budget => 32
+            )",
+            sql_literal(&base_url)
+        )));
+
+        let response = sql_json(
+            "SELECT postllm.chat(ARRAY[postllm.user('apply the guardrail automatically')])",
+        );
+        let request_body = receiver
+            .recv()
+            .expect("mock server should capture the token-budget request");
+
+        assert_eq!(
+            response["choices"][0]["message"]["content"],
+            "guardrail applied"
+        );
+        assert_eq!(request_body["model"], "mock-budget-model");
+        assert_eq!(request_body["max_tokens"], 32);
+    }
+
+    #[pg_test]
+    fn sql_chat_should_inject_max_tokens_from_spend_budget() {
+        let (base_url, receiver) = start_mock_json_server(
+            "/v1/chat/completions",
+            r#"{
+                "id":"chatcmpl-spend-budget",
+                "object":"chat.completion",
+                "choices":[
+                    {
+                        "index":0,
+                        "message":{"role":"assistant","content":"spend guardrail applied"},
+                        "finish_reason":"stop"
+                    }
+                ],
+                "usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}
+            }"#,
+        );
+
+        drop(sql_json(&format!(
+            "SELECT postllm.configure(
+                runtime => 'openai',
+                base_url => {},
+                model => 'mock-spend-model',
+                request_spend_budget_microusd => 750,
+                output_token_price_microusd_per_1k => 250000
+            )",
+            sql_literal(&base_url)
+        )));
+
+        let response =
+            sql_json("SELECT postllm.chat(ARRAY[postllm.user('derive max_tokens from spend')])");
+        let request_body = receiver
+            .recv()
+            .expect("mock server should capture the spend-budget request");
+
+        assert_eq!(
+            response["choices"][0]["message"]["content"],
+            "spend guardrail applied"
+        );
+        assert_eq!(request_body["max_tokens"], 3);
     }
 
     #[pg_test]
@@ -9270,6 +9393,34 @@ mod tests {
     fn sql_chat_should_reject_non_positive_max_tokens() {
         drop(Spi::get_one::<JsonB>(
             "SELECT postllm.chat(ARRAY[postllm.user('hello')], max_tokens => 0)",
+        ));
+    }
+
+    #[pg_test]
+    #[should_panic(
+        expected = "argument 'max_tokens' must be less than or equal to 8 because postllm request guardrails are active, got 16"
+    )]
+    fn sql_chat_should_reject_max_tokens_above_request_token_budget() {
+        drop(sql_json(
+            "SELECT postllm.configure(request_token_budget => 8)",
+        ));
+
+        drop(Spi::get_one::<JsonB>(
+            "SELECT postllm.chat(ARRAY[postllm.user('hello')], max_tokens => 16)",
+        ));
+    }
+
+    #[pg_test]
+    #[should_panic(
+        expected = "postllm.output_token_price_microusd_per_1k must be greater than zero when postllm.request_spend_budget_microusd is enabled"
+    )]
+    fn sql_chat_should_reject_spend_budget_without_output_token_price() {
+        drop(sql_json(
+            "SELECT postllm.configure(request_spend_budget_microusd => 500)",
+        ));
+
+        drop(Spi::get_one::<JsonB>(
+            "SELECT postllm.chat(ARRAY[postllm.user('hello')])",
         ));
     }
 
