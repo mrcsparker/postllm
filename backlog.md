@@ -28,6 +28,8 @@ Last manually verified in-repo on 2026-04-05:
 - `cargo test --lib` passed.
 - `bash scripts/e2e_llama.sh` passed.
 - `bash scripts/e2e_candle.sh` passed.
+- 2026-04-17 follow-up: `cargo pgrx test pg17 sql_request_metrics_should_ -F pg_test` passed.
+- 2026-04-17 follow-up: `cargo pgrx test pg17 sql_request_metric_views_should_ -F pg_test` passed.
 
 This snapshot confirms the current hosted `llama-server` Docker lane and the local Candle Docker lane are both green. Keep this section current when backlog status is updated so the plan stays anchored to a real checked state instead of a guessed one.
 
@@ -151,7 +153,7 @@ Issues:
 - [x] `PL-038` Add role-aware permission controls for runtimes, models, and privileged settings.
 - [x] `PL-039` Add network allowlists and provider safelists for HTTP runtimes.
 - [x] `PL-040` Add request logging and audit trails with opt-in prompt/response redaction.
-- [ ] `PL-041` Add metrics views for latency, errors, token usage, and request counts.
+- [x] `PL-041` Add metrics views for latency, errors, token usage, and request counts.
 - [ ] `PL-042` Add quotas and guardrails for token budget, runtime budget, and spend.
 - [ ] `PL-043` Add backpressure controls so concurrent model work cannot overwhelm the database.
 - [ ] `PL-044` Document operational guidance for when inference inside PostgreSQL is appropriate and when it is not.

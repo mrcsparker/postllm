@@ -104,4 +104,5 @@ Treat this as part of your architecture:
 - keep latency-sensitive SQL paths explicit.
 - gate runtime switches with permissions and allowlists.
 - use `postllm.request_audit_log` only when you explicitly need audit visibility, and prefer redacted payload settings for routine production debugging.
+- when request logging is enabled, prefer `postllm.request_metrics`, `postllm.request_count_metrics`, `postllm.request_error_metrics`, `postllm.request_latency_metrics`, and `postllm.request_token_usage_metrics` for latency/error/token rollups instead of re-parsing JSON from the raw audit table.
 - use `runtime_discover()` and `runtime_ready()` in startup scripts.

@@ -118,6 +118,146 @@ pgrx::extension_sql!(
 
     COMMENT ON TABLE postllm.request_audit_log IS
         'Opt-in audit trail for postllm request execution, including optional redaction of request and response payload fields.';
+
+    CREATE VIEW postllm.request_metrics AS
+    SELECT
+        id,
+        logged_at,
+        role_name,
+        backend_pid,
+        operation,
+        runtime,
+        model,
+        base_url,
+        status,
+        duration_ms,
+        input_redacted,
+        output_redacted,
+        CASE
+            WHEN jsonb_typeof(
+                COALESCE(
+                    response_payload #> '{_postllm,usage,prompt_tokens}',
+                    response_payload #> '{usage,prompt_tokens}'
+                )
+            ) = 'number'
+            THEN (
+                COALESCE(
+                    response_payload #>> '{_postllm,usage,prompt_tokens}',
+                    response_payload #>> '{usage,prompt_tokens}'
+                )
+            )::bigint
+        END AS prompt_tokens,
+        CASE
+            WHEN jsonb_typeof(
+                COALESCE(
+                    response_payload #> '{_postllm,usage,completion_tokens}',
+                    response_payload #> '{usage,completion_tokens}'
+                )
+            ) = 'number'
+            THEN (
+                COALESCE(
+                    response_payload #>> '{_postllm,usage,completion_tokens}',
+                    response_payload #>> '{usage,completion_tokens}'
+                )
+            )::bigint
+        END AS completion_tokens,
+        CASE
+            WHEN jsonb_typeof(
+                COALESCE(
+                    response_payload #> '{_postllm,usage,total_tokens}',
+                    response_payload #> '{usage,total_tokens}'
+                )
+            ) = 'number'
+            THEN (
+                COALESCE(
+                    response_payload #>> '{_postllm,usage,total_tokens}',
+                    response_payload #>> '{usage,total_tokens}'
+                )
+            )::bigint
+        END AS total_tokens,
+        error_message
+    FROM postllm.request_audit_log;
+
+    COMMENT ON VIEW postllm.request_metrics IS
+        'Normalized per-request metrics derived from postllm.request_audit_log, including latency, status, and extracted token usage.';
+
+    CREATE VIEW postllm.request_count_metrics AS
+    SELECT
+        role_name,
+        operation,
+        runtime,
+        model,
+        base_url,
+        count(*) AS request_count,
+        count(*) FILTER (WHERE status = 'ok') AS ok_count,
+        count(*) FILTER (WHERE status = 'error') AS error_count,
+        min(logged_at) AS first_logged_at,
+        max(logged_at) AS last_logged_at
+    FROM postllm.request_metrics
+    GROUP BY role_name, operation, runtime, model, base_url;
+
+    COMMENT ON VIEW postllm.request_count_metrics IS
+        'All-time request counts grouped by role, operation, runtime, model, and base URL.';
+
+    CREATE VIEW postllm.request_error_metrics AS
+    SELECT
+        role_name,
+        operation,
+        runtime,
+        model,
+        base_url,
+        count(*) AS request_count,
+        count(*) FILTER (WHERE status = 'error') AS error_count,
+        (count(*) FILTER (WHERE status = 'error'))::double precision
+            / count(*)::double precision AS error_rate,
+        max(logged_at) FILTER (WHERE status = 'error') AS last_error_at,
+        (
+            array_agg(error_message ORDER BY logged_at DESC)
+            FILTER (WHERE status = 'error' AND error_message IS NOT NULL)
+        )[1] AS last_error_message
+    FROM postllm.request_metrics
+    GROUP BY role_name, operation, runtime, model, base_url;
+
+    COMMENT ON VIEW postllm.request_error_metrics IS
+        'All-time error counts and most recent error details grouped by role, operation, runtime, model, and base URL.';
+
+    CREATE VIEW postllm.request_latency_metrics AS
+    SELECT
+        role_name,
+        operation,
+        runtime,
+        model,
+        base_url,
+        count(*) AS request_count,
+        round(avg(duration_ms)::numeric, 2) AS avg_duration_ms,
+        percentile_cont(0.50) WITHIN GROUP (ORDER BY duration_ms) AS p50_duration_ms,
+        percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms) AS p95_duration_ms,
+        max(duration_ms) AS max_duration_ms
+    FROM postllm.request_metrics
+    GROUP BY role_name, operation, runtime, model, base_url;
+
+    COMMENT ON VIEW postllm.request_latency_metrics IS
+        'All-time request latency rollups grouped by role, operation, runtime, model, and base URL.';
+
+    CREATE VIEW postllm.request_token_usage_metrics AS
+    SELECT
+        role_name,
+        operation,
+        runtime,
+        model,
+        base_url,
+        count(*) AS request_count,
+        count(*) FILTER (WHERE total_tokens IS NOT NULL) AS requests_with_usage,
+        COALESCE(sum(prompt_tokens), 0) AS prompt_tokens,
+        COALESCE(sum(completion_tokens), 0) AS completion_tokens,
+        COALESCE(sum(total_tokens), 0) AS total_tokens,
+        round(avg(total_tokens)::numeric, 2) AS avg_total_tokens,
+        max(total_tokens) AS max_total_tokens
+    FROM postllm.request_metrics
+    GROUP BY role_name, operation, runtime, model, base_url;
+
+    COMMENT ON VIEW postllm.request_token_usage_metrics IS
+        'All-time token-usage rollups grouped by role, operation, runtime, model, and base URL.';
     ",
     name = "postllm_catalog_tables",
     requires = [postllm::settings],
@@ -5735,6 +5875,57 @@ mod tests {
         )
     }
 
+    fn insert_request_audit_metric_row(
+        role_name: &str,
+        operation: &str,
+        runtime: Option<&str>,
+        model: Option<&str>,
+        base_url: Option<&str>,
+        status: &str,
+        duration_ms: i64,
+        response_payload: Option<&Value>,
+        error_message: Option<&str>,
+    ) {
+        let runtime_sql = runtime
+            .map(sql_literal)
+            .unwrap_or_else(|| "NULL".to_owned());
+        let model_sql = model.map(sql_literal).unwrap_or_else(|| "NULL".to_owned());
+        let base_url_sql = base_url
+            .map(sql_literal)
+            .unwrap_or_else(|| "NULL".to_owned());
+        let response_payload_sql = response_payload
+            .map(|payload| format!("{}::jsonb", sql_literal(&payload.to_string())))
+            .unwrap_or_else(|| "NULL".to_owned());
+        let error_message_sql = error_message
+            .map(sql_literal)
+            .unwrap_or_else(|| "NULL".to_owned());
+
+        sql_run(&format!(
+            "SELECT postllm._request_audit_insert(
+                role_name => {},
+                operation => {},
+                runtime => {},
+                model => {},
+                base_url => {},
+                status => {},
+                duration_ms => {},
+                input_redacted => true,
+                output_redacted => true,
+                response_payload => {},
+                error_message => {}
+            )",
+            sql_literal(role_name),
+            sql_literal(operation),
+            runtime_sql,
+            model_sql,
+            base_url_sql,
+            sql_literal(status),
+            duration_ms,
+            response_payload_sql,
+            error_message_sql,
+        ));
+    }
+
     fn unique_role_name(label: &str) -> String {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -7305,6 +7496,227 @@ mod tests {
             "keep this out of the audit table"
         );
         assert_eq!(request_audit_row_count(), 0);
+    }
+
+    #[pg_test]
+    fn sql_request_metrics_should_extract_normalized_usage_fields() {
+        clear_request_audit_log();
+
+        insert_request_audit_metric_row(
+            "metrics_reader",
+            "chat",
+            Some("openai"),
+            Some("metrics-model"),
+            Some("http://metrics.example.test/v1/chat/completions"),
+            "ok",
+            125,
+            Some(&json!({
+                "_postllm": {
+                    "usage": {
+                        "prompt_tokens": 11,
+                        "completion_tokens": 4,
+                        "total_tokens": 15
+                    }
+                }
+            })),
+            None,
+        );
+
+        let row = sql_json(
+            "SELECT to_jsonb(metric)
+             FROM (
+                SELECT *
+                FROM postllm.request_metrics
+                ORDER BY id
+                LIMIT 1
+             ) AS metric",
+        );
+
+        assert_eq!(row["role_name"], "metrics_reader");
+        assert_eq!(row["operation"], "chat");
+        assert_eq!(row["runtime"], "openai");
+        assert_eq!(row["model"], "metrics-model");
+        assert_eq!(
+            row["base_url"],
+            "http://metrics.example.test/v1/chat/completions"
+        );
+        assert_eq!(row["status"], "ok");
+        assert_eq!(row["duration_ms"], 125);
+        assert_eq!(row["prompt_tokens"], 11);
+        assert_eq!(row["completion_tokens"], 4);
+        assert_eq!(row["total_tokens"], 15);
+        assert!(row["error_message"].is_null());
+    }
+
+    #[pg_test]
+    fn sql_request_metric_views_should_roll_up_metrics() {
+        clear_request_audit_log();
+
+        insert_request_audit_metric_row(
+            "app_user",
+            "chat",
+            Some("openai"),
+            Some("metrics-model"),
+            Some("http://metrics.example.test/v1/chat/completions"),
+            "ok",
+            120,
+            Some(&json!({
+                "_postllm": {
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 5,
+                        "total_tokens": 15
+                    }
+                }
+            })),
+            None,
+        );
+        insert_request_audit_metric_row(
+            "app_user",
+            "chat",
+            Some("openai"),
+            Some("metrics-model"),
+            Some("http://metrics.example.test/v1/chat/completions"),
+            "error",
+            240,
+            None,
+            Some("provider timeout"),
+        );
+        insert_request_audit_metric_row(
+            "app_user",
+            "chat",
+            Some("openai"),
+            Some("metrics-model"),
+            Some("http://metrics.example.test/v1/chat/completions"),
+            "ok",
+            60,
+            Some(&json!({
+                "_postllm": {
+                    "usage": {
+                        "prompt_tokens": 8,
+                        "completion_tokens": 2,
+                        "total_tokens": 10
+                    }
+                }
+            })),
+            None,
+        );
+        insert_request_audit_metric_row(
+            "embed_user",
+            "embed",
+            Some("candle"),
+            Some("embed-model"),
+            None,
+            "ok",
+            80,
+            Some(&json!({
+                "vector_count": 1,
+                "dimension": 384,
+                "normalize": true
+            })),
+            None,
+        );
+
+        let count_row = sql_json(
+            "SELECT to_jsonb(metric)
+             FROM (
+                SELECT *
+                FROM postllm.request_count_metrics
+                WHERE role_name = 'app_user'
+                  AND operation = 'chat'
+                  AND runtime = 'openai'
+                  AND model = 'metrics-model'
+                LIMIT 1
+             ) AS metric",
+        );
+        let error_row = sql_json(
+            "SELECT jsonb_build_object(
+                'request_count', request_count,
+                'error_count', error_count,
+                'error_rate', round(error_rate::numeric, 4),
+                'last_error_message', last_error_message
+            )
+            FROM postllm.request_error_metrics
+            WHERE role_name = 'app_user'
+              AND operation = 'chat'
+              AND runtime = 'openai'
+              AND model = 'metrics-model'",
+        );
+        let latency_row = sql_json(
+            "SELECT jsonb_build_object(
+                'request_count', request_count,
+                'avg_duration_ms', avg_duration_ms,
+                'p50_duration_ms', p50_duration_ms,
+                'p95_duration_ms', round(p95_duration_ms::numeric, 2),
+                'max_duration_ms', max_duration_ms
+            )
+            FROM postllm.request_latency_metrics
+            WHERE role_name = 'app_user'
+              AND operation = 'chat'
+              AND runtime = 'openai'
+              AND model = 'metrics-model'",
+        );
+        let token_row = sql_json(
+            "SELECT jsonb_build_object(
+                'request_count', request_count,
+                'requests_with_usage', requests_with_usage,
+                'prompt_tokens', prompt_tokens,
+                'completion_tokens', completion_tokens,
+                'total_tokens', total_tokens,
+                'avg_total_tokens', avg_total_tokens,
+                'max_total_tokens', max_total_tokens
+            )
+            FROM postllm.request_token_usage_metrics
+            WHERE role_name = 'app_user'
+              AND operation = 'chat'
+              AND runtime = 'openai'
+              AND model = 'metrics-model'",
+        );
+        let embed_token_row = sql_json(
+            "SELECT jsonb_build_object(
+                'request_count', request_count,
+                'requests_with_usage', requests_with_usage,
+                'prompt_tokens', prompt_tokens,
+                'completion_tokens', completion_tokens,
+                'total_tokens', total_tokens,
+                'avg_total_tokens', avg_total_tokens
+            )
+            FROM postllm.request_token_usage_metrics
+            WHERE role_name = 'embed_user'
+              AND operation = 'embed'
+              AND runtime = 'candle'
+              AND model = 'embed-model'",
+        );
+
+        assert_eq!(count_row["request_count"], 3);
+        assert_eq!(count_row["ok_count"], 2);
+        assert_eq!(count_row["error_count"], 1);
+
+        assert_eq!(error_row["request_count"], 3);
+        assert_eq!(error_row["error_count"], 1);
+        assert_eq!(error_row["error_rate"].as_f64(), Some(0.3333));
+        assert_eq!(error_row["last_error_message"], "provider timeout");
+
+        assert_eq!(latency_row["request_count"], 3);
+        assert_eq!(latency_row["avg_duration_ms"].as_f64(), Some(140.0));
+        assert_eq!(latency_row["p50_duration_ms"].as_f64(), Some(120.0));
+        assert_eq!(latency_row["p95_duration_ms"].as_f64(), Some(228.0));
+        assert_eq!(latency_row["max_duration_ms"], 240);
+
+        assert_eq!(token_row["request_count"], 3);
+        assert_eq!(token_row["requests_with_usage"], 2);
+        assert_eq!(token_row["prompt_tokens"], 18);
+        assert_eq!(token_row["completion_tokens"], 7);
+        assert_eq!(token_row["total_tokens"], 25);
+        assert_eq!(token_row["avg_total_tokens"].as_f64(), Some(12.5));
+        assert_eq!(token_row["max_total_tokens"], 15);
+
+        assert_eq!(embed_token_row["request_count"], 1);
+        assert_eq!(embed_token_row["requests_with_usage"], 0);
+        assert_eq!(embed_token_row["prompt_tokens"], 0);
+        assert_eq!(embed_token_row["completion_tokens"], 0);
+        assert_eq!(embed_token_row["total_tokens"], 0);
+        assert!(embed_token_row["avg_total_tokens"].is_null());
     }
 
     #[pg_test]
