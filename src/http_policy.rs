@@ -185,13 +185,15 @@ fn host_is_allowed(base_url: &str, allowed_hosts: &[String]) -> Result<bool> {
     let host_and_port = port.map(|port| format!("{host}:{port}"));
 
     Ok(allowed_hosts.iter().any(|entry| {
-        if let Some(suffix) = entry.strip_prefix("*.") {
-            host == suffix || host.ends_with(&format!(".{suffix}"))
-        } else if let Some(host_and_port) = host_and_port.as_deref() {
-            entry == host || entry == host_and_port
-        } else {
-            entry == host
-        }
+        entry.strip_prefix("*.").map_or_else(
+            || {
+                host_and_port
+                    .as_deref()
+                    .is_some_and(|host_and_port| entry == host || entry == host_and_port)
+                    || entry == host
+            },
+            |suffix| host == suffix || host.ends_with(&format!(".{suffix}")),
+        )
     }))
 }
 
@@ -217,7 +219,7 @@ fn parse_csv_setting(raw: Option<&str>) -> Vec<String> {
         .flat_map(|value| value.split(','))
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| value.to_ascii_lowercase())
+        .map(str::to_ascii_lowercase)
         .collect()
 }
 
@@ -230,8 +232,7 @@ fn is_valid_exact_host_entry(entry: &str) -> bool {
 
     Url::parse(&candidate)
         .ok()
-        .and_then(|url| url.host_str().map(|_| ()))
-        .is_some()
+        .is_some_and(|url| url.host_str().is_some())
 }
 
 #[cfg(test)]

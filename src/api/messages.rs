@@ -1,3 +1,9 @@
+#![allow(
+    clippy::needless_pass_by_value,
+    clippy::redundant_pub_crate,
+    reason = "pgrx materializes SQL-facing values as owned Rust types and these wrappers are crate-visible by design"
+)]
+
 use pgrx::JsonB;
 
 // SQL-facing message and tool helper constructors.
@@ -21,10 +27,6 @@ pub(crate) fn assistant(content: &str) -> JsonB {
     crate::finish_json_result(crate::build_message("assistant", content))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-)]
 pub(crate) fn render_template(
     template: &str,
     variables: pgrx::default!(Option<JsonB>, "NULL"),
@@ -35,10 +37,6 @@ pub(crate) fn render_template(
     ))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-)]
 pub(crate) fn message_template(
     role: &str,
     template: &str,
@@ -51,10 +49,6 @@ pub(crate) fn message_template(
     ))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-)]
 pub(crate) fn system_template(
     template: &str,
     variables: pgrx::default!(Option<JsonB>, "NULL"),
@@ -66,10 +60,6 @@ pub(crate) fn system_template(
     ))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-)]
 pub(crate) fn user_template(
     template: &str,
     variables: pgrx::default!(Option<JsonB>, "NULL"),
@@ -81,10 +71,6 @@ pub(crate) fn user_template(
     ))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-)]
 pub(crate) fn assistant_template(
     template: &str,
     variables: pgrx::default!(Option<JsonB>, "NULL"),
@@ -104,50 +90,26 @@ pub(crate) fn image_url_part(url: &str, detail: pgrx::default!(Option<&str>, "NU
     crate::finish_json_result(crate::build_image_url_part(url, detail))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL array arguments as owned Rust values"
-)]
 pub(crate) fn message_parts(role: &str, parts: Vec<JsonB>) -> JsonB {
     crate::finish_json_result(crate::build_parts_message(role, &parts))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL array arguments as owned Rust values"
-)]
 pub(crate) fn system_parts(parts: Vec<JsonB>) -> JsonB {
     crate::finish_json_result(crate::build_parts_message("system", &parts))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL array arguments as owned Rust values"
-)]
 pub(crate) fn user_parts(parts: Vec<JsonB>) -> JsonB {
     crate::finish_json_result(crate::build_parts_message("user", &parts))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL array arguments as owned Rust values"
-)]
 pub(crate) fn assistant_parts(parts: Vec<JsonB>) -> JsonB {
     crate::finish_json_result(crate::build_parts_message("assistant", &parts))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-)]
 pub(crate) fn tool_call(id: &str, name: &str, arguments: JsonB) -> JsonB {
     crate::finish_json_result(crate::build_tool_call(id, name, &arguments.0))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL array arguments as owned Rust values"
-)]
 pub(crate) fn assistant_tool_calls(
     tool_calls: Vec<JsonB>,
     content: pgrx::default!(Option<&str>, "NULL"),
@@ -159,10 +121,6 @@ pub(crate) fn tool_result(tool_call_id: &str, content: &str) -> JsonB {
     crate::finish_json_result(crate::build_tool_result(tool_call_id, content))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-)]
 pub(crate) fn function_tool(
     name: &str,
     parameters: JsonB,
@@ -187,10 +145,6 @@ pub(crate) fn tool_choice_function(name: &str) -> JsonB {
     crate::finish_json_result(crate::build_tool_choice_function(name))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-)]
 pub(crate) fn json_schema(name: &str, schema: JsonB, strict: pgrx::default!(bool, true)) -> JsonB {
     crate::finish_json_result(crate::build_json_schema_response_format(
         name, &schema.0, strict,

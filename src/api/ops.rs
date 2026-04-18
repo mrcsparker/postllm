@@ -1,3 +1,9 @@
+#![allow(
+    clippy::needless_pass_by_value,
+    clippy::redundant_pub_crate,
+    reason = "pgrx materializes SQL-facing values as owned Rust types and these wrappers are crate-visible by design"
+)]
+
 use pgrx::JsonB;
 
 // SQL-facing model-lifecycle entrypoints.

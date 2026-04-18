@@ -204,7 +204,7 @@ pub(crate) fn redact_payload_fields(value: &Value) -> Value {
         Value::Array(values) => {
             Value::Array(values.iter().map(redact_payload_fields).collect::<Vec<_>>())
         }
-        _ => value.clone(),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => value.clone(),
     }
 }
 
@@ -226,6 +226,10 @@ fn require_non_blank<'value>(name: &str, value: &'value str) -> Result<&'value s
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    reason = "redaction assertions are clearest when they access the exact JSON paths under test"
+)]
 mod tests {
     use super::REDACTED_VALUE;
     use super::redact_payload_fields;

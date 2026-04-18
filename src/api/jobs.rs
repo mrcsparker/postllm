@@ -1,3 +1,9 @@
+#![allow(
+    clippy::needless_pass_by_value,
+    clippy::redundant_pub_crate,
+    reason = "pgrx materializes SQL-facing values as owned Rust types and these wrappers are crate-visible by design"
+)]
+
 use pgrx::JsonB;
 
 // SQL-facing async-job entrypoints.
@@ -6,10 +12,6 @@ use pgrx::JsonB;
 // model while leaving lifecycle, validation, and worker orchestration in the
 // internal jobs module.
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-)]
 pub(crate) fn submit(kind: &str, request: JsonB) -> JsonB {
     crate::finish_json_result(crate::jobs::submit(kind, &request.0))
 }

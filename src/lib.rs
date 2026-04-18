@@ -296,6 +296,10 @@ pgrx::extension_sql!(
 );
 
 #[pgrx::pg_schema]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "pgrx materializes SQL-facing values as owned Rust types for exported SQL functions"
+)]
 mod postllm {
     use crate::api::{config, inference, jobs, messages, ops, retrieval};
     use pgrx::iter::TableIterator;
@@ -329,10 +333,6 @@ mod postllm {
     }
 
     /// Submits one durable async job and returns the queued job row.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-    )]
     #[pg_extern(security_definer)]
     #[search_path(postllm, pg_catalog)]
     fn job_submit(kind: &str, request: JsonB) -> JsonB {
@@ -363,6 +363,10 @@ mod postllm {
     #[doc(hidden)]
     #[pg_extern(name = "_request_audit_insert", security_definer)]
     #[search_path(postllm, pg_catalog)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the SQL shim mirrors the persisted audit row shape one-for-one"
+    )]
     fn request_audit_insert(
         role_name: &str,
         operation: &str,
@@ -703,20 +707,12 @@ mod postllm {
     }
 
     /// Renders a prompt template by substituting `{{name}}` placeholders from a JSON object.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn render_template(template: &str, variables: default!(Option<JsonB>, "NULL")) -> String {
         messages::render_template(template, variables)
     }
 
     /// Builds a chat message by first rendering a prompt template.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn message_template(
         role: &str,
@@ -727,30 +723,18 @@ mod postllm {
     }
 
     /// Builds a `system` message by first rendering a prompt template.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn system_template(template: &str, variables: default!(Option<JsonB>, "NULL")) -> JsonB {
         messages::system_template(template, variables)
     }
 
     /// Builds a `user` message by first rendering a prompt template.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn user_template(template: &str, variables: default!(Option<JsonB>, "NULL")) -> JsonB {
         messages::user_template(template, variables)
     }
 
     /// Builds an `assistant` message by first rendering a prompt template.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn assistant_template(template: &str, variables: default!(Option<JsonB>, "NULL")) -> JsonB {
         messages::assistant_template(template, variables)
@@ -769,60 +753,36 @@ mod postllm {
     }
 
     /// Builds a chat message whose content is an array of content parts.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL array arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn message_parts(role: &str, parts: Vec<JsonB>) -> JsonB {
         messages::message_parts(role, parts)
     }
 
     /// Builds a `system` message whose content is an array of content parts.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL array arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn system_parts(parts: Vec<JsonB>) -> JsonB {
         messages::system_parts(parts)
     }
 
     /// Builds a `user` message whose content is an array of content parts.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL array arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn user_parts(parts: Vec<JsonB>) -> JsonB {
         messages::user_parts(parts)
     }
 
     /// Builds an `assistant` message whose content is an array of content parts.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL array arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn assistant_parts(parts: Vec<JsonB>) -> JsonB {
         messages::assistant_parts(parts)
     }
 
     /// Builds a function-style tool call object.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn tool_call(id: &str, name: &str, arguments: JsonB) -> JsonB {
         messages::tool_call(id, name, arguments)
     }
 
     /// Builds an assistant message that carries tool calls.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL array arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn assistant_tool_calls(
         tool_calls: Vec<JsonB>,
@@ -838,10 +798,6 @@ mod postllm {
     }
 
     /// Builds an OpenAI-compatible function-tool definition for future tool-calling requests.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn function_tool(
         name: &str,
@@ -876,10 +832,6 @@ mod postllm {
     }
 
     /// Builds a JSON-schema response-format contract for structured generation.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn json_schema(name: &str, schema: JsonB, strict: default!(bool, true)) -> JsonB {
         messages::json_schema(name, schema, strict)
@@ -942,10 +894,6 @@ mod postllm {
     }
 
     /// Sends a prepared conversation to the configured LLM and returns provider JSON plus normalized `_postllm` metadata.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL array arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn chat(
         messages: Vec<JsonB>,
@@ -957,10 +905,6 @@ mod postllm {
     }
 
     /// Sends a prepared conversation to the configured LLM and returns the first textual answer.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL array arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn chat_text(
         messages: Vec<JsonB>,
@@ -972,10 +916,6 @@ mod postllm {
     }
 
     /// Streams a prepared conversation and returns one row per provider chunk with a normalized text delta.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL array arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn chat_stream(
         messages: Vec<JsonB>,
@@ -994,10 +934,6 @@ mod postllm {
     }
 
     /// Sends a prepared conversation to the configured LLM with a structured-output contract and returns parsed `jsonb`.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL array and jsonb arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn chat_structured(
         messages: Vec<JsonB>,
@@ -1010,10 +946,6 @@ mod postllm {
     }
 
     /// Sends a prepared conversation plus OpenAI-compatible tool definitions and returns the raw provider response.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL array and jsonb arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn chat_tools(
         messages: Vec<JsonB>,
@@ -1027,40 +959,24 @@ mod postllm {
     }
 
     /// Returns normalized token-usage metadata for a provider response.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn usage(response: JsonB) -> JsonB {
         inference::usage(response)
     }
 
     /// Returns a specific choice object from a provider response.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn choice(response: JsonB, index: i32) -> JsonB {
         inference::choice(response, index)
     }
 
     /// Returns the normalized finish reason for a provider response when one is available.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn finish_reason(response: JsonB) -> Option<String> {
         inference::finish_reason(response)
     }
 
     /// Extracts the first textual completion from a provider response object.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn extract_text(response: JsonB) -> String {
         inference::extract_text(response)
@@ -1077,10 +993,6 @@ mod postllm {
     }
 
     /// Computes local embeddings for multiple inputs and returns them as JSON.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL array arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn embed_many(
         inputs: Vec<String>,
@@ -1134,10 +1046,6 @@ mod postllm {
     }
 
     /// Chunks a document, computes embeddings, and returns canonical row data for embedding tables.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn embed_document(
         doc_id: &str,
@@ -1170,10 +1078,6 @@ mod postllm {
     }
 
     /// Upserts canonical chunk rows into a caller-owned embedding table and optionally prunes stale chunks.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-    )]
     #[expect(
         clippy::too_many_arguments,
         reason = "the SQL surface intentionally keeps ingestion configuration flat instead of forcing callers through a JSON argument"
@@ -1214,10 +1118,6 @@ mod postllm {
     }
 
     /// Splits text into chunk rows and propagates caller metadata onto every emitted chunk.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn chunk_document(
         input: &str,
@@ -1236,10 +1136,6 @@ mod postllm {
     }
 
     /// Computes `PostgreSQL` full-text keyword ranks for candidate documents.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL array arguments as owned Rust values"
-    )]
     #[allow(
         clippy::type_complexity,
         reason = "pgrx SQL generation requires the exported TableIterator shape inline"
@@ -1282,10 +1178,6 @@ mod postllm {
     }
 
     /// Fuses semantic reranking with `PostgreSQL` keyword search over the same candidate documents.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL array arguments as owned Rust values"
-    )]
     #[expect(
         clippy::too_many_arguments,
         reason = "the SQL surface keeps hybrid retrieval controls flat instead of forcing a JSON wrapper"
@@ -1332,10 +1224,6 @@ mod postllm {
     }
 
     /// Reranks candidate documents for one query and returns ordered rows with the original document index.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL array arguments as owned Rust values"
-    )]
     #[allow(
         clippy::type_complexity,
         reason = "pgrx SQL generation requires the exported TableIterator shape inline"
@@ -1359,10 +1247,6 @@ mod postllm {
     }
 
     /// Retrieves context documents, builds a prompt, and returns the answer plus retrieval metadata.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL array arguments as owned Rust values"
-    )]
     #[expect(
         clippy::too_many_arguments,
         reason = "the SQL surface keeps the batteries-included RAG helper flat instead of forcing a JSON wrapper"
@@ -1403,10 +1287,6 @@ mod postllm {
     }
 
     /// Retrieves context documents, builds a prompt, and returns only the answer text.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL array arguments as owned Rust values"
-    )]
     #[expect(
         clippy::too_many_arguments,
         reason = "the SQL surface keeps the batteries-included RAG helper flat instead of forcing a JSON wrapper"
@@ -1459,10 +1339,6 @@ mod postllm {
     }
 
     /// Sends a single prompt with a structured-output contract and returns parsed `jsonb`.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn complete_structured(
         prompt: &str,
@@ -1502,10 +1378,6 @@ mod postllm {
     }
 
     /// Sends a prompt plus OpenAI-compatible tool definitions and returns the raw provider response.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL array and jsonb arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn complete_tools(
         prompt: &str,
@@ -1528,10 +1400,6 @@ mod postllm {
     }
 
     /// Sends multiple prompts, optionally preceded by the same system prompt, and returns the text results in input order.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL array arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn complete_many(
         prompts: Vec<String>,
@@ -1544,10 +1412,6 @@ mod postllm {
     }
 
     /// Sends multiple prompts and returns one row per completion for set-oriented SQL workflows.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pgrx materializes SQL array arguments as owned Rust values"
-    )]
     #[pg_extern]
     fn complete_many_rows(
         prompts: Vec<String>,
@@ -1730,10 +1594,7 @@ impl LocalModelLaneSelector {
     }
 
     fn parse_or_default(value: Option<&str>) -> Result<Self> {
-        match value {
-            None => Ok(Self::Auto),
-            Some(value) => Self::parse(value),
-        }
+        value.map_or_else(|| Ok(Self::Auto), Self::parse)
     }
 }
 
@@ -2436,7 +2297,7 @@ fn runtime_discover_impl() -> Value {
             backend::Runtime::OpenAi => discover_hosted_runtime(&settings),
             backend::Runtime::Candle => discover_candle_runtime(&settings),
         },
-        Err(error) => runtime_discover_error(error),
+        Err(error) => runtime_discover_error(&error),
     }
 }
 
@@ -2473,7 +2334,7 @@ fn discover_hosted_runtime(settings: &backend::Settings) -> Value {
     attach_execution_environment(client::discover_openai_runtime(settings))
 }
 
-fn runtime_discover_error(error: Error) -> Value {
+fn runtime_discover_error(error: &Error) -> Value {
     json!({
         "runtime": guc::snapshot().get("runtime").cloned().unwrap_or(Value::Null),
         "provider": Value::Null,
@@ -2499,7 +2360,7 @@ fn attach_execution_environment(mut discovery: Value) -> Value {
 fn discover_candle_runtime(settings: &backend::Settings) -> Value {
     let embedding_model = match guc::resolve_embedding_model(None) {
         Ok(model) => model,
-        Err(error) => return candle_runtime_failure(settings, None, error, None),
+        Err(error) => return candle_runtime_failure(settings, None, &error, None),
     };
     let generation = match inspect_candle_model(
         &settings.model,
@@ -2507,7 +2368,9 @@ fn discover_candle_runtime(settings: &backend::Settings) -> Value {
         settings,
     ) {
         Ok(snapshot) => snapshot,
-        Err(error) => return candle_runtime_failure(settings, Some(&embedding_model), error, None),
+        Err(error) => {
+            return candle_runtime_failure(settings, Some(&embedding_model), &error, None);
+        }
     };
     let embedding = match inspect_candle_model(
         &embedding_model,
@@ -2519,7 +2382,7 @@ fn discover_candle_runtime(settings: &backend::Settings) -> Value {
             return candle_runtime_failure(
                 settings,
                 Some(&embedding_model),
-                error,
+                &error,
                 Some(generation),
             );
         }
@@ -2559,7 +2422,7 @@ fn inspect_candle_model(
 fn candle_runtime_failure(
     settings: &backend::Settings,
     embedding_model: Option<&str>,
-    error: Error,
+    error: &Error,
     generation: Option<Value>,
 ) -> Value {
     let mut discovery = json!({
@@ -5969,6 +5832,11 @@ mod helper_tests {
 #[allow(
     clippy::expect_used,
     clippy::indexing_slicing,
+    clippy::bool_assert_comparison,
+    clippy::map_unwrap_or,
+    clippy::too_many_arguments,
+    clippy::unnecessary_option_map_or_else,
+    clippy::useless_format,
     reason = "SQL-facing pg_test assertions are clearer with direct indexing and explicit expects"
 )]
 mod tests {
@@ -6060,8 +5928,7 @@ mod tests {
         let json_line = stdout
             .lines()
             .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .last()
+            .rfind(|line| !line.is_empty())
             .expect("psql should emit one JSON line");
 
         serde_json::from_str(json_line).expect("psql should emit valid JSON")
@@ -6139,12 +6006,10 @@ mod tests {
                 return row;
             }
 
-            if started.elapsed() >= Duration::from_millis(timeout_ms) {
-                panic!(
-                    "async job {job_id} did not reach one of {:?} within {timeout_ms}ms; last row: {row}",
-                    expected
-                );
-            }
+            assert!(
+                started.elapsed() < Duration::from_millis(timeout_ms),
+                "async job {job_id} did not reach one of {expected:?} within {timeout_ms}ms; last row: {row}"
+            );
 
             thread::sleep(Duration::from_millis(25));
         }
@@ -6971,7 +6836,7 @@ mod tests {
                 "request_token_budget": 128,
                 "request_runtime_budget_ms": 4000,
                 "request_spend_budget_microusd": 750,
-                "output_token_price_microusd_per_1k": 250000,
+                "output_token_price_microusd_per_1k": 250_000,
             })
         );
         assert_eq!(fetched["name"], "hosted-staging");
@@ -6991,7 +6856,7 @@ mod tests {
         assert_eq!(applied["request_token_budget"], 128);
         assert_eq!(applied["request_runtime_budget_ms"], 4000);
         assert_eq!(applied["request_spend_budget_microusd"], 750);
-        assert_eq!(applied["output_token_price_microusd_per_1k"], 250000);
+        assert_eq!(applied["output_token_price_microusd_per_1k"], 250_000);
         assert_eq!(applied["api_key_source"], "none");
         assert_eq!(applied["api_key_secret"], Value::Null);
     }
@@ -7958,6 +7823,10 @@ mod tests {
     }
 
     #[pg_test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "this SQL-facing rollup test keeps the seeded audit fixtures and assertions together"
+    )]
     fn sql_request_metric_views_should_roll_up_metrics() {
         clear_request_audit_log();
 

@@ -1,3 +1,7 @@
+#![allow(
+    clippy::items_after_test_module,
+    reason = "small unit tests live near the helpers they exercise in this settings module"
+)]
 #![expect(
     clippy::redundant_pub_crate,
     reason = "this module exposes crate-private APIs across sibling modules"
@@ -1360,6 +1364,10 @@ pub(crate) fn ensure_active_privileged_settings_allowed() -> Result<()> {
     Ok(())
 }
 
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "callers resolve owned string settings before these permission checks inspect presence"
+)]
 fn ensure_present_string_setting_allowed(
     value: Option<String>,
     permission_name: &str,
@@ -1371,6 +1379,10 @@ fn ensure_present_string_setting_allowed(
     Ok(())
 }
 
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "callers resolve owned string settings before these permission checks compare defaults"
+)]
 fn ensure_non_default_string_setting_allowed(
     value: Option<String>,
     default_value: &str,
@@ -1646,6 +1658,10 @@ fn min_optional_i32(left: Option<i32>, right: Option<i32>) -> Option<i32> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "unit tests use expect-style assertions for clearer failure context"
+)]
 mod test {
     use super::{effective_timeout_limit, output_token_budget_from_spend};
 

@@ -18,6 +18,10 @@ const REQUEST_CONCURRENCY_POLL_INTERVAL_MS: u64 = 25;
 
 /// Shared request requirements for generation-oriented entrypoints.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "SQL request capability checks are clearer when each optional feature stays explicit"
+)]
 pub(crate) struct GenerationRequirements {
     pub(crate) feature: backend::Feature,
     pub(crate) temperature: f64,
@@ -114,13 +118,11 @@ impl ExecutionContext {
                 self.operation,
             )?;
             settings = Some(resolved);
+            let settings_ref = settings.as_ref().ok_or_else(|| {
+                Error::Internal("resolved embedding settings should exist".to_owned())
+            })?;
 
-            execute(
-                settings
-                    .as_ref()
-                    .expect("resolved embedding settings should exist"),
-                prepared,
-            )
+            execute(settings_ref, prepared)
         })();
 
         self.finish(
@@ -169,8 +171,11 @@ impl ExecutionContext {
                 self.operation,
             )?;
             settings = Some(resolved);
+            let settings_ref = settings
+                .as_ref()
+                .ok_or_else(|| Error::Internal("resolved settings should exist".to_owned()))?;
 
-            execute(settings.as_ref().expect("resolved settings should exist"))
+            execute(settings_ref)
         })();
 
         self.finish(
@@ -209,13 +214,32 @@ impl ExecutionContext {
 
 /// Returns the audit operation name for generation requests.
 #[must_use]
-pub(crate) fn generation_operation(feature: backend::Feature, streaming: bool) -> &'static str {
-    match (feature, streaming) {
-        (backend::Feature::Chat, false) => "chat",
-        (backend::Feature::Complete, false) => "complete",
-        (backend::Feature::Chat, true) => "chat_stream",
-        (backend::Feature::Complete, true) => "complete_stream",
-        _ => "chat",
+pub(crate) const fn generation_operation(
+    feature: backend::Feature,
+    streaming: bool,
+) -> &'static str {
+    if streaming {
+        match feature {
+            backend::Feature::Complete => "complete_stream",
+            backend::Feature::Chat
+            | backend::Feature::Embeddings
+            | backend::Feature::Reranking
+            | backend::Feature::Tools
+            | backend::Feature::StructuredOutputs
+            | backend::Feature::Streaming
+            | backend::Feature::MultimodalInputs => "chat_stream",
+        }
+    } else {
+        match feature {
+            backend::Feature::Complete => "complete",
+            backend::Feature::Chat
+            | backend::Feature::Embeddings
+            | backend::Feature::Reranking
+            | backend::Feature::Tools
+            | backend::Feature::StructuredOutputs
+            | backend::Feature::Streaming
+            | backend::Feature::MultimodalInputs => "chat",
+        }
     }
 }
 

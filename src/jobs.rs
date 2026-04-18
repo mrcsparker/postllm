@@ -108,7 +108,7 @@ impl AsyncJobRequest {
         }
     }
 
-    fn kind(&self) -> &'static str {
+    const fn kind(&self) -> &'static str {
         match self {
             Self::Chat(_) => JOB_KIND_CHAT,
             Self::Complete(_) => JOB_KIND_COMPLETE,
@@ -437,9 +437,8 @@ fn spawn_job_runner(job_id: i64, execute_role: &str) -> Result<()> {
     let database = current_database_name()?;
     let session_user = current_session_user()?;
     let quoted_role = quote_identifier(execute_role)?;
-    let claim_sql = format!(
-        "SET ROLE {quoted_role}; SELECT {SUBPROCESS_CLAIM_FUNCTION}({job_id});"
-    );
+    let claim_sql =
+        format!("SET ROLE {quoted_role}; SELECT {SUBPROCESS_CLAIM_FUNCTION}({job_id});");
     let run_sql = format!("SET ROLE {quoted_role}; SELECT {SUBPROCESS_RUN_FUNCTION}({job_id});");
     let _child = Command::new(psql_path())
         .args([
@@ -542,14 +541,18 @@ fn fetch_running_job(job_id: i64) -> Result<Option<ClaimedJob>> {
 }
 
 fn current_socket_dir() -> Result<String> {
-    sql_text("SHOW unix_socket_directories").map(|value| {
-        value
-            .split(',')
-            .next()
-            .expect("socket directory should have at least one value")
-            .trim()
-            .to_owned()
-    })
+    let value = sql_text("SHOW unix_socket_directories")?;
+
+    value
+        .split(',')
+        .map(str::trim)
+        .find(|entry| !entry.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            Error::Internal(
+                "SHOW unix_socket_directories returned no socket directory entries".to_owned(),
+            )
+        })
 }
 
 fn current_port() -> Result<String> {
@@ -610,7 +613,7 @@ fn fetch_job_row(job_id: i64, submitted_by: &str) -> Result<Value> {
 }
 
 fn update_job_cancelled(job_id: i64, submitted_by: &str, message: &str) -> Result<()> {
-    let _ = Spi::run_with_args(
+    Spi::run_with_args(
         r"
         UPDATE postllm.async_jobs
         SET status = 'cancelled',
@@ -632,7 +635,7 @@ fn update_job_cancelled(job_id: i64, submitted_by: &str, message: &str) -> Resul
 }
 
 fn mark_job_launch_failure(job_id: i64, error_message: &str) -> Result<()> {
-    let _ = Spi::run_with_args(
+    Spi::run_with_args(
         r"
         UPDATE postllm.async_jobs
         SET status = 'failed',
@@ -653,7 +656,7 @@ fn mark_job_launch_failure(job_id: i64, error_message: &str) -> Result<()> {
 }
 
 fn reconcile_stale_running_jobs() -> Result<()> {
-    let _ = Spi::run(
+    Spi::run(
         r"
         UPDATE postllm.async_jobs AS jobs
         SET status = 'failed',

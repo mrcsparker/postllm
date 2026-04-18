@@ -461,7 +461,7 @@ fn fetch_secret_payload(name: &str) -> Result<StoredSecret> {
             &[DatumWithOid::from(name)],
         )?;
         if table.is_empty() {
-            return Err(unknown_secret("api_key_secret", name).into());
+            return Err(unknown_secret("api_key_secret", name));
         }
         let row = table.first();
 
@@ -579,6 +579,10 @@ fn trimmed_or_none_option(value: Option<&str>) -> Option<String> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "unit tests use expect-style assertions for clearer failure context"
+)]
 mod test {
     use super::ModelAliasLane;
 

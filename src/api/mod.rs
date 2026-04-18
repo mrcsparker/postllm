@@ -1,3 +1,8 @@
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "these sibling modules are re-exported within crate::api for the SQL router in lib.rs"
+)]
+
 pub(crate) mod config;
 pub(crate) mod inference;
 pub(crate) mod jobs;

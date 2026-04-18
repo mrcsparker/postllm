@@ -9,6 +9,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use ring::rand::{SecureRandom, SystemRandom};
 use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 
 const SECRET_ALGORITHM: &str = "chacha20poly1305-v1";
 const SECRET_KEY_ENV: &str = "POSTLLM_SECRET_KEY";
@@ -130,11 +131,9 @@ fn master_key_material() -> Result<MasterKeyMaterial> {
 }
 
 fn hex_prefix(bytes: &[u8], chars: usize) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        let _ = write!(&mut encoded, "{byte:02x}");
     }
     encoded.truncate(chars.min(encoded.len()));
     encoded
@@ -147,6 +146,10 @@ struct MasterKeyMaterial {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "unit tests use expect-style assertions for clearer failure context"
+)]
 mod tests {
     use super::{StoredSecret, decrypt_secret, encrypt_secret};
 

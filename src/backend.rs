@@ -100,7 +100,7 @@ pub(crate) struct Settings {
     pub(crate) max_retries: u32,
     /// Base backoff between transient HTTP retries in milliseconds.
     pub(crate) retry_backoff_ms: u64,
-    /// Optional operator-enforced cap on concurrent model requests across PostgreSQL backends.
+    /// Optional operator-enforced cap on concurrent model requests across `PostgreSQL` backends.
     pub(crate) request_max_concurrency: u32,
     /// Optional host or host:port allowlist for hosted HTTP runtimes.
     pub(crate) http_allowed_hosts: Vec<String>,

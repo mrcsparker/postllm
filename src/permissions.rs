@@ -278,7 +278,9 @@ fn permission_scope_active(object_type: PermissionObjectType, target: &str) -> R
                   AND target IN ($2, $3)
             )"
         }
-        _ => {
+        PermissionObjectType::Runtime
+        | PermissionObjectType::GenerationModel
+        | PermissionObjectType::EmbeddingModel => {
             "SELECT EXISTS(
                 SELECT 1
                 FROM postllm.role_permissions
@@ -293,7 +295,11 @@ fn permission_scope_active(object_type: PermissionObjectType, target: &str) -> R
             DatumWithOid::from(target),
             DatumWithOid::from(WILDCARD_TARGET),
         ],
-        _ => vec![DatumWithOid::from(object_type.as_str())],
+        PermissionObjectType::Runtime
+        | PermissionObjectType::GenerationModel
+        | PermissionObjectType::EmbeddingModel => {
+            vec![DatumWithOid::from(object_type.as_str())]
+        }
     };
 
     Spi::get_one_with_args::<bool>(sql, &args)
@@ -429,7 +435,7 @@ fn privileged_settings_list() -> String {
         .join(", ")
 }
 
-fn denied_fix_suffix(object_type: PermissionObjectType) -> &'static str {
+const fn denied_fix_suffix(object_type: PermissionObjectType) -> &'static str {
     match object_type {
         PermissionObjectType::Runtime => "runtime",
         PermissionObjectType::GenerationModel => "generation model",
@@ -443,6 +449,10 @@ fn caller_role_oid() -> pg_sys::Oid {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "unit tests use expect-style assertions for clearer failure context"
+)]
 mod test {
     use super::PermissionObjectType;
 

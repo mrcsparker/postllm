@@ -1,3 +1,8 @@
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "this helper module stays crate-private but intentionally uses crate-visible exports"
+)]
+
 use crate::error::{Error, Result};
 
 /// Returns the normalized, canonical representation used for enum matching.
@@ -10,7 +15,6 @@ pub(crate) fn normalize_input(value: &str) -> String {
 ///
 /// Returns the normalized value when no match exists so callers can produce
 /// context-specific diagnostics.
-#[must_use]
 pub(crate) fn parse_case_insensitive<T: Copy>(
     value: &str,
     variants: &'static [(&'static str, T)],
@@ -25,7 +29,6 @@ pub(crate) fn parse_case_insensitive<T: Copy>(
 
 /// Parses a case-insensitive value against a canonical variant map.
 /// Returns `Some(variant)` when the value matches, otherwise `None`.
-#[must_use]
 pub(crate) fn parse_case_insensitive_optional<T: Copy>(
     value: &str,
     variants: &'static [(&'static str, T)],
@@ -35,7 +38,6 @@ pub(crate) fn parse_case_insensitive_optional<T: Copy>(
 
 /// Parses a value using `parse_case_insensitive_required` semantics.
 /// Returns a standardized invalid-argument error when the input is blank or invalid.
-#[must_use]
 pub(crate) fn parse_case_insensitive_required<T: Copy>(
     argument: &str,
     value: &str,
@@ -71,16 +73,19 @@ fn format_enumeration(values: &[&str]) -> String {
         [] => String::new(),
         [only] => format!("'{only}'"),
         [first, second] => format!("'{first}' or '{second}'"),
-        values => {
+        _ => {
+            let Some((last, leading)) = values.split_last() else {
+                return String::new();
+            };
             let mut rendered = String::new();
-            for value in &values[..values.len() - 1] {
+            for value in leading {
                 rendered.push('\'');
                 rendered.push_str(value);
                 rendered.push_str("', ");
             }
 
             rendered.push_str("or '");
-            rendered.push_str(values[values.len() - 1]);
+            rendered.push_str(last);
             rendered.push('\'');
             rendered
         }
@@ -105,6 +110,10 @@ pub(crate) fn parse_case_insensitive_with_default_error<T: Copy>(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "unit tests use expect-style assertions for clearer failure context"
+)]
 mod test {
     use super::format_variant_values;
     use super::parse_case_insensitive;

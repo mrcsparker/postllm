@@ -1,3 +1,9 @@
+#![allow(
+    clippy::needless_pass_by_value,
+    clippy::redundant_pub_crate,
+    reason = "pgrx materializes SQL-facing values as owned Rust types and these wrappers are crate-visible by design"
+)]
+
 use pgrx::JsonB;
 use pgrx::iter::TableIterator;
 
@@ -16,10 +22,6 @@ pub(crate) fn chat(
     crate::finish_json_result(crate::chat_impl(&messages, model, temperature, max_tokens))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL array arguments as owned Rust values"
-)]
 pub(crate) fn chat_text(
     messages: Vec<JsonB>,
     model: pgrx::default!(Option<&str>, "NULL"),
@@ -34,10 +36,6 @@ pub(crate) fn chat_text(
     ))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL array arguments as owned Rust values"
-)]
 pub(crate) fn chat_stream(
     messages: Vec<JsonB>,
     model: pgrx::default!(Option<&str>, "NULL"),
@@ -59,10 +57,6 @@ pub(crate) fn chat_stream(
     ))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL array and jsonb arguments as owned Rust values"
-)]
 pub(crate) fn chat_structured(
     messages: Vec<JsonB>,
     response_format: JsonB,
@@ -79,10 +73,6 @@ pub(crate) fn chat_structured(
     ))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL array and jsonb arguments as owned Rust values"
-)]
 pub(crate) fn chat_tools(
     messages: Vec<JsonB>,
     tools: Vec<JsonB>,
@@ -105,26 +95,14 @@ pub(crate) fn usage(response: JsonB) -> JsonB {
     JsonB(crate::usage_impl(&response.0))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-)]
 pub(crate) fn choice(response: JsonB, index: i32) -> JsonB {
     crate::finish_json_result(crate::choice_impl(&response.0, index))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-)]
 pub(crate) fn finish_reason(response: JsonB) -> Option<String> {
     crate::backend::finish_reason(&response.0)
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-)]
 pub(crate) fn extract_text(response: JsonB) -> String {
     crate::finish_text_result(crate::client::extract_text(&response.0))
 }
@@ -145,10 +123,6 @@ pub(crate) fn complete(
     ))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-)]
 pub(crate) fn complete_structured(
     prompt: &str,
     response_format: JsonB,
@@ -190,10 +164,6 @@ pub(crate) fn complete_stream(
     ))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL array and jsonb arguments as owned Rust values"
-)]
 pub(crate) fn complete_tools(
     prompt: &str,
     tools: Vec<JsonB>,
@@ -214,10 +184,6 @@ pub(crate) fn complete_tools(
     ))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL array arguments as owned Rust values"
-)]
 pub(crate) fn complete_many(
     prompts: Vec<String>,
     system_prompt: pgrx::default!(Option<&str>, "NULL"),
@@ -234,10 +200,6 @@ pub(crate) fn complete_many(
     ))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL array arguments as owned Rust values"
-)]
 pub(crate) fn complete_many_rows(
     prompts: Vec<String>,
     system_prompt: pgrx::default!(Option<&str>, "NULL"),

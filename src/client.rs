@@ -121,6 +121,10 @@ pub(crate) fn chat_stream_response(
 
 /// Probes the configured OpenAI-compatible runtime and reports discovery metadata.
 #[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "this probes multiple readiness failure modes and returns a single SQL-facing snapshot"
+)]
 pub(crate) fn discover_openai_runtime(settings: &crate::backend::Settings) -> Value {
     let endpoint = crate::http_policy::summarize(settings);
     let provider = endpoint.provider.clone();
@@ -930,6 +934,7 @@ fn parse_rerank_response(
 #[allow(
     clippy::expect_used,
     clippy::indexing_slicing,
+    clippy::needless_pass_by_value,
     reason = "tests should fail loudly with focused messages when fixtures break"
 )]
 mod tests {

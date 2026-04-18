@@ -1,3 +1,9 @@
+#![allow(
+    clippy::needless_pass_by_value,
+    clippy::redundant_pub_crate,
+    reason = "pgrx materializes SQL-facing values as owned Rust types and these wrappers are crate-visible by design"
+)]
+
 use pgrx::JsonB;
 use pgrx::iter::TableIterator;
 use serde_json::json;
@@ -16,10 +22,6 @@ pub(crate) fn embed(
     crate::finish_vector_result(crate::embed_impl(input, model, normalize))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL array arguments as owned Rust values"
-)]
 pub(crate) fn embed_many(
     inputs: Vec<String>,
     model: pgrx::default!(Option<&str>, "NULL"),
@@ -67,10 +69,6 @@ pub(crate) fn embed_document(
 }
 
 #[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-)]
-#[expect(
     clippy::too_many_arguments,
     reason = "the SQL surface intentionally keeps ingestion configuration flat instead of forcing callers through a JSON argument"
 )]
@@ -104,10 +102,6 @@ pub(crate) fn chunk_text(input: &str, chunk_chars: i32, overlap_chars: i32) -> V
     crate::finish_text_array_result(crate::chunk_text_impl(input, chunk_chars, overlap_chars))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL jsonb arguments as owned Rust values"
-)]
 pub(crate) fn chunk_document(
     input: &str,
     metadata: pgrx::default!(Option<JsonB>, "NULL"),
@@ -129,10 +123,6 @@ pub(crate) fn chunk_document(
     ))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL array arguments as owned Rust values"
-)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL generation requires the exported TableIterator shape inline"
@@ -178,10 +168,6 @@ pub(crate) fn rrf_score(
 }
 
 #[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL array arguments as owned Rust values"
-)]
-#[expect(
     clippy::too_many_arguments,
     reason = "the SQL surface keeps hybrid retrieval controls flat instead of forcing a JSON wrapper"
 )]
@@ -225,10 +211,6 @@ pub(crate) fn hybrid_rank(
     ))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL array arguments as owned Rust values"
-)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL generation requires the exported TableIterator shape inline"
@@ -250,10 +232,6 @@ pub(crate) fn rerank(
     crate::finish_rank_rows_result(crate::rerank_impl(query, &documents, top_n, model))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL array arguments as owned Rust values"
-)]
 #[expect(
     clippy::too_many_arguments,
     reason = "the SQL surface keeps the batteries-included RAG helper flat instead of forcing a JSON wrapper"
@@ -292,10 +270,6 @@ pub(crate) fn rag(
     ))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pgrx materializes SQL array arguments as owned Rust values"
-)]
 #[expect(
     clippy::too_many_arguments,
     reason = "the SQL surface keeps the batteries-included RAG helper flat instead of forcing a JSON wrapper"

@@ -1,6 +1,6 @@
 # postllm
 
-`postllm` is a PostgreSQL extension that makes LLM workflows native to SQL.
+`postllm` is a `PostgreSQL` extension that makes LLM workflows native to SQL.
 
 It provides:
 
@@ -62,7 +62,7 @@ For full signatures, use the grouped list in [docs/reference.md](./docs/referenc
 
 `postllm` exposes two runtime lanes:
 
-- `openai` for OpenAI-compatible HTTP APIs (OpenAI, Ollama, llama-server style).
+- `openai` for `OpenAI`-compatible HTTP APIs (`OpenAI`, Ollama, llama-server style).
 - `candle` for local inference paths (embeddings, reranking, and starter generation).
 
 The SQL API shape is shared across runtimes; capability checks determine what arguments are valid in each lane.
@@ -78,7 +78,7 @@ Current code organization:
 
 ## Notes for production use
 
-Inference runs inside PostgreSQL backends. Before running in shared environments, make intent checks explicit:
+Inference runs inside `PostgreSQL` backends. Before running in shared environments, make intent checks explicit:
 
 - `runtime_discover()` and `runtime_ready()` for environment sanity.
 - `permission_*` for role-aware controls.
