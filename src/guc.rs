@@ -687,16 +687,21 @@ pub(crate) fn resolve_rerank(model_override: Option<&str>) -> Result<Settings> {
     Ok(settings)
 }
 
-/// Resolves settings for local Candle embedding requests.
+/// Resolves settings for embedding requests on the active runtime.
 pub(crate) fn resolve_embedding_settings(model_override: Option<&str>) -> Result<Settings> {
     let inputs = resolve_setting_inputs()?;
+    let runtime = resolve_runtime()?;
+    permissions::ensure_runtime_allowed(runtime)?;
     ensure_active_privileged_settings_allowed()?;
     let model = resolve_embedding_model(model_override)?;
+    let settings = inputs.into_settings(runtime, model);
 
-    Ok(inputs.into_settings(Runtime::Candle, model))
+    crate::http_policy::enforce_settings(&settings)?;
+
+    Ok(settings)
 }
 
-/// Resolves the current Candle embedding model, optionally overriding it for one request.
+/// Resolves the current embedding model, optionally overriding it for one request.
 pub(crate) fn resolve_embedding_model(model_override: Option<&str>) -> Result<String> {
     let model = model_override.and_then(trimmed_or_none).map_or_else(
         || {

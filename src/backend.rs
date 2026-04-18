@@ -387,18 +387,23 @@ impl CapabilitySnapshot {
     }
 
     fn embedding_support(&self) -> FeatureSupport {
-        self.embedding_model.as_deref().map_or_else(
-            || {
-                FeatureSupport::unsupported(
-                    Some(Runtime::CANDLE.to_owned()),
-                    None,
-                    "postllm.embedding_model is not set".to_owned(),
-                )
-            },
-            |model| {
-                FeatureSupport::available(Some(Runtime::CANDLE.to_owned()), Some(model.to_owned()))
-            },
-        )
+        match (self.runtime, self.embedding_model.as_deref()) {
+            (Some(runtime), Some(model)) => {
+                FeatureSupport::available(Some(runtime.as_str().to_owned()), Some(model.to_owned()))
+            }
+            (Some(runtime), None) => FeatureSupport::unsupported(
+                Some(runtime.as_str().to_owned()),
+                None,
+                "postllm.embedding_model is not set".to_owned(),
+            ),
+            (None, _) => FeatureSupport::unsupported(
+                self.runtime_setting.clone(),
+                self.embedding_model.clone(),
+                self.runtime_error
+                    .clone()
+                    .unwrap_or_else(|| "postllm.runtime is not set".to_owned()),
+            ),
+        }
     }
 
     fn reranking_support(&self) -> FeatureSupport {
@@ -642,20 +647,34 @@ impl FeatureSupport {
 
         if reason == Some("postllm.embedding_model is not set") {
             return Some(match feature {
-                Feature::Reranking => {
-                    "SET postllm.embedding_model = 'sentence-transformers/paraphrase-MiniLM-L3-v2' or pass model => '...' to postllm.rerank"
-                        .to_owned()
-                }
+                Feature::Reranking => match self.runtime.as_deref() {
+                    Some(Runtime::OPENAI) => {
+                        "SET postllm.embedding_model = 'text-embedding-3-small' or pass model => '...' to postllm.rerank"
+                            .to_owned()
+                    }
+                    Some(Runtime::CANDLE) | None => {
+                        "SET postllm.embedding_model = 'sentence-transformers/paraphrase-MiniLM-L3-v2' or pass model => '...' to postllm.rerank"
+                            .to_owned()
+                    }
+                    Some(_) => unreachable!("feature support stores normalized runtime names"),
+                },
                 Feature::Chat
                 | Feature::Complete
                 | Feature::Embeddings
                 | Feature::Tools
                 | Feature::StructuredOutputs
                 | Feature::Streaming
-                | Feature::MultimodalInputs => {
-                    "SET postllm.embedding_model = 'sentence-transformers/paraphrase-MiniLM-L3-v2' or pass model => '...' to postllm.embed/postllm.embed_many"
-                        .to_owned()
-                }
+                | Feature::MultimodalInputs => match self.runtime.as_deref() {
+                    Some(Runtime::OPENAI) => {
+                        "SET postllm.embedding_model = 'text-embedding-3-small' or pass model => '...' to postllm.embed/postllm.embed_many"
+                            .to_owned()
+                    }
+                    Some(Runtime::CANDLE) | None => {
+                        "SET postllm.embedding_model = 'sentence-transformers/paraphrase-MiniLM-L3-v2' or pass model => '...' to postllm.embed/postllm.embed_many"
+                            .to_owned()
+                    }
+                    Some(_) => unreachable!("feature support stores normalized runtime names"),
+                },
             });
         }
 
@@ -778,6 +797,18 @@ pub(crate) fn rerank_response(
     match settings.runtime {
         Runtime::OpenAi => crate::client::rerank_response(settings, query, documents, top_n),
         Runtime::Candle => crate::candle::rerank(settings, query, documents, top_n),
+    }
+}
+
+/// Executes an embedding request against the selected runtime.
+pub(crate) fn embed_response(
+    settings: &Settings,
+    inputs: &[String],
+    normalize: bool,
+) -> Result<Vec<Vec<f32>>> {
+    match settings.runtime {
+        Runtime::OpenAi => crate::client::embed_response(settings, inputs, normalize),
+        Runtime::Candle => crate::candle::embed(settings, inputs, normalize),
     }
 }
 

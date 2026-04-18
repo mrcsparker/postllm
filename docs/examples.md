@@ -236,6 +236,26 @@ SELECT postllm.complete(
 );
 ```
 
+### Hosted embeddings
+
+```sql
+SELECT postllm.configure(
+    runtime => 'openai',
+    base_url => 'https://api.openai.com/v1/chat/completions',
+    embedding_model => 'text-embedding-3-small',
+    api_key_secret => 'openai-prod'
+);
+
+SELECT postllm.embed('Explain VACUUM in one sentence.');
+
+SELECT postllm.embed_many(ARRAY[
+    'What is MVCC?',
+    'What does autovacuum do?'
+]);
+```
+
+`postllm` derives the sibling `/v1/embeddings` endpoint from `base_url`, so the same hosted profile can handle chat and embeddings.
+
 ### Local embeddings
 
 ```sql

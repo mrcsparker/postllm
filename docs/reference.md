@@ -131,6 +131,8 @@ This page is grouped by domain so you can scan what you need quickly.
 
 ## Chunking and embedding
 
+Embedding calls use the active runtime. On the `openai` runtime, `postllm` derives a sibling `/v1/embeddings` endpoint from `postllm.base_url`.
+
 - `postllm.chunk_text(input text, chunk_chars int default 1000, overlap_chars int default 200) -> text[]`
 - `postllm.chunk_document(input text, metadata jsonb default null, chunk_chars int default 1000, overlap_chars int default 200) -> table(index int, chunk text, metadata jsonb)`
 - `postllm.embed_document(doc_id text, input text, metadata jsonb default null, chunk_chars int default 1000, overlap_chars int default 200, model text default null, normalize bool default true) -> table(chunk_id text, doc_id text, chunk_no int, content text, metadata jsonb, embedding real[])`

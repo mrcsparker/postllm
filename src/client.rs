@@ -112,6 +112,20 @@ pub(crate) fn rerank_response(
     })
 }
 
+/// Executes a hosted embeddings request and returns normalized vectors.
+pub(crate) fn embed_response(
+    settings: &crate::backend::Settings,
+    inputs: &[String],
+    normalize: bool,
+) -> Result<Vec<Vec<f32>>> {
+    let settings = settings.clone();
+    let inputs = inputs.to_vec();
+
+    run_interruptible_request(move |cancelled| {
+        execute_embedding_response(&settings, &inputs, normalize, cancelled.as_ref())
+    })
+}
+
 /// Executes a streaming chat-completions request and returns parsed chunk events.
 pub(crate) fn chat_stream_response(
     settings: &crate::backend::Settings,
@@ -526,6 +540,68 @@ fn execute_rerank_response(
     })
 }
 
+fn execute_embedding_response(
+    settings: &crate::backend::Settings,
+    inputs: &[String],
+    normalize: bool,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Vec<f32>>> {
+    retry_http_request(settings, cancelled, || {
+        execute_embedding_response_once(settings, inputs, normalize, cancelled)
+    })
+}
+
+fn execute_embedding_response_once(
+    settings: &crate::backend::Settings,
+    inputs: &[String],
+    normalize: bool,
+    cancelled: &AtomicBool,
+) -> HttpRequestResult<Vec<Vec<f32>>> {
+    crate::http_policy::enforce_settings(settings).map_err(HttpRequestError::Postllm)?;
+
+    let Some(base_url) = settings.base_url.as_deref() else {
+        return Err(HttpRequestError::Postllm(Error::invalid_setting(
+            "postllm.base_url",
+            format!(
+                "is required when runtime is '{}' and embedding_model is '{}'",
+                settings.runtime.as_str(),
+                settings.model,
+            ),
+            "SET postllm.base_url = 'https://api.openai.com/v1/embeddings' or pass base_url => '...' to postllm.configure(...)",
+        )));
+    };
+
+    let embeddings_url = derive_embeddings_url(base_url).map_err(HttpRequestError::Postllm)?;
+    let client = Client::builder()
+        .timeout(Duration::from_millis(settings.timeout_ms))
+        .build()
+        .map_err(HttpRequestError::Transport)?;
+    let payload = build_embedding_request_payload(&settings.model, inputs);
+    let mut request = client
+        .post(&embeddings_url)
+        .header(CONTENT_TYPE, "application/json")
+        .json(&payload);
+
+    if let Some(api_key) = settings.api_key.as_deref() {
+        request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
+    }
+
+    let response = request.send().map_err(HttpRequestError::Transport)?;
+    let status = response.status();
+    let body = read_response_body(response, cancelled)?;
+
+    if !status.is_success() {
+        return Err(HttpRequestError::Upstream {
+            status,
+            body: truncate_body(&String::from_utf8_lossy(&body)),
+        });
+    }
+
+    let response = serde_json::from_slice::<Value>(&body).map_err(HttpRequestError::JsonDecode)?;
+
+    parse_embedding_response(&response, normalize).map_err(HttpRequestError::Postllm)
+}
+
 fn execute_rerank_response_once(
     settings: &crate::backend::Settings,
     query: &str,
@@ -704,6 +780,13 @@ pub(crate) fn build_request_payload(
     payload
 }
 
+fn build_embedding_request_payload(model: &str, inputs: &[String]) -> Value {
+    json!({
+        "model": model,
+        "input": inputs,
+    })
+}
+
 fn build_request_payload_for_endpoint(
     endpoint: HostedEndpointFlavor,
     model: &str,
@@ -767,6 +850,47 @@ fn build_stream_request_payload(
     }
 
     payload
+}
+
+fn derive_embeddings_url(base_url: &str) -> Result<String> {
+    let mut url = Url::parse(base_url).map_err(|_| {
+        Error::invalid_setting(
+            "postllm.base_url",
+            format!("must be a valid absolute URL, got '{base_url}'"),
+            "SET postllm.base_url = 'https://api.openai.com/v1/embeddings' or another valid absolute URL",
+        )
+    })?;
+
+    let Some(mut segments) = url
+        .path_segments()
+        .map(|segments| segments.map(str::to_owned).collect::<Vec<String>>())
+    else {
+        return Err(Error::invalid_setting(
+            "postllm.base_url",
+            format!("must include a path segment, got '{base_url}'"),
+            "SET postllm.base_url = 'https://api.openai.com/v1/embeddings' or another endpoint under /v1/",
+        ));
+    };
+
+    if matches!(segments.last().map(String::as_str), Some("completions")) {
+        segments.pop();
+    }
+    if matches!(segments.last().map(String::as_str), Some("chat")) {
+        segments.pop();
+    }
+    if matches!(
+        segments.last().map(String::as_str),
+        Some("responses" | "rerank" | "embeddings")
+    ) {
+        segments.pop();
+    }
+    if segments.is_empty() {
+        segments.push("v1".to_owned());
+    }
+    segments.push("embeddings".to_owned());
+    url.set_path(&format!("/{}", segments.join("/")));
+
+    Ok(url.to_string())
 }
 
 fn build_stream_request_payload_for_endpoint(
@@ -1223,6 +1347,79 @@ fn responses_finish_reason(response: &Value, has_tool_calls: bool) -> Value {
     }
 }
 
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "provider embedding payloads decode as f64, but postllm exposes embeddings as f32 vectors"
+)]
+fn parse_embedding_response(response: &Value, normalize: bool) -> Result<Vec<Vec<f32>>> {
+    let Some(data) = response.get("data").and_then(Value::as_array) else {
+        return Err(Error::MalformedResponse);
+    };
+    if data.is_empty() {
+        return Err(Error::MalformedResponse);
+    }
+
+    let mut indexed = data
+        .iter()
+        .enumerate()
+        .map(|(position, item)| {
+            let index = item
+                .get("index")
+                .and_then(Value::as_u64)
+                .and_then(|index| usize::try_from(index).ok())
+                .unwrap_or(position);
+            let embedding = item
+                .get("embedding")
+                .and_then(Value::as_array)
+                .ok_or(Error::MalformedResponse)?
+                .iter()
+                .map(|value| {
+                    value
+                        .as_f64()
+                        .map(|number| number as f32)
+                        .ok_or(Error::MalformedResponse)
+                })
+                .collect::<Result<Vec<f32>>>()?;
+
+            Ok::<(usize, Vec<f32>), Error>((index, maybe_normalize_embedding(embedding, normalize)))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    indexed.sort_unstable_by_key(|(index, _)| *index);
+
+    Ok(indexed
+        .into_iter()
+        .map(|(_, embedding)| embedding)
+        .collect::<Vec<_>>())
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "vector normalization keeps the f32 embedding shape expected by SQL callers"
+)]
+fn maybe_normalize_embedding(mut embedding: Vec<f32>, normalize: bool) -> Vec<f32> {
+    if !normalize {
+        return embedding;
+    }
+
+    let magnitude = embedding
+        .iter()
+        .map(|value| f64::from(*value) * f64::from(*value))
+        .sum::<f64>()
+        .sqrt();
+
+    if magnitude == 0.0 {
+        return embedding;
+    }
+
+    let scale = magnitude as f32;
+    for value in &mut embedding {
+        *value /= scale;
+    }
+
+    embedding
+}
+
 fn build_responses_request_payload(
     model: &str,
     messages: &[Value],
@@ -1457,11 +1654,12 @@ fn parse_rerank_response(
 )]
 mod tests {
     use super::{
-        HostedEndpointFlavor, build_request_payload, build_request_payload_for_endpoint,
-        build_rerank_request_payload, build_stream_request_payload, chat_response,
-        chat_stream_response, extract_text, hosted_endpoint_flavor,
-        normalize_response_for_endpoint, normalize_stream_events_for_endpoint,
-        parse_rerank_response, parse_sse_json_events, rerank_response,
+        HostedEndpointFlavor, build_embedding_request_payload, build_request_payload,
+        build_request_payload_for_endpoint, build_rerank_request_payload,
+        build_stream_request_payload, chat_response, chat_stream_response, derive_embeddings_url,
+        embed_response, extract_text, hosted_endpoint_flavor, normalize_response_for_endpoint,
+        normalize_stream_events_for_endpoint, parse_embedding_response, parse_rerank_response,
+        parse_sse_json_events, rerank_response,
     };
     use crate::backend::test_support::SettingsBuilder;
     use crate::backend::{RequestOptions, RerankResult, Runtime, Settings};
@@ -1721,6 +1919,17 @@ mod tests {
     }
 
     #[test]
+    fn build_embedding_request_payload_should_include_model_and_inputs() {
+        let payload = build_embedding_request_payload(
+            "text-embedding-3-small",
+            &["hello".to_owned(), "world".to_owned()],
+        );
+
+        assert_eq!(payload["model"], "text-embedding-3-small");
+        assert_eq!(payload["input"], json!(["hello", "world"]));
+    }
+
+    #[test]
     fn build_stream_request_payload_should_enable_streaming() {
         let payload = build_stream_request_payload(
             "llama3.2",
@@ -1744,6 +1953,51 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0]["choices"][0]["delta"]["content"], "hel");
         assert_eq!(events[1]["choices"][0]["finish_reason"], "stop");
+    }
+
+    #[test]
+    fn derive_embeddings_url_should_resolve_sibling_endpoint_from_chat_and_responses_paths() {
+        assert_eq!(
+            derive_embeddings_url("https://api.openai.com/v1/chat/completions")
+                .expect("chat completions path should derive"),
+            "https://api.openai.com/v1/embeddings"
+        );
+        assert_eq!(
+            derive_embeddings_url("https://api.openai.com/v1/responses")
+                .expect("responses path should derive"),
+            "https://api.openai.com/v1/embeddings"
+        );
+        assert_eq!(
+            derive_embeddings_url("https://api.openai.com/v1/rerank")
+                .expect("rerank path should derive"),
+            "https://api.openai.com/v1/embeddings"
+        );
+    }
+
+    #[test]
+    fn parse_embedding_response_should_sort_by_index_and_optionally_normalize() {
+        let response = json!({
+            "data": [
+                {
+                    "index": 1,
+                    "embedding": [3.0, 4.0]
+                },
+                {
+                    "index": 0,
+                    "embedding": [0.0, 5.0]
+                }
+            ]
+        });
+
+        let raw = parse_embedding_response(&response, false).expect("raw embeddings should parse");
+        let normalized =
+            parse_embedding_response(&response, true).expect("normalized embeddings should parse");
+
+        assert_eq!(raw, vec![vec![0.0, 5.0], vec![3.0, 4.0]]);
+        assert!((normalized[0][0] - 0.0).abs() < 1.0e-6);
+        assert!((normalized[0][1] - 1.0).abs() < 1.0e-6);
+        assert!((normalized[1][0] - 0.6).abs() < 1.0e-6);
+        assert!((normalized[1][1] - 0.8).abs() < 1.0e-6);
     }
 
     #[test]
@@ -1841,6 +2095,44 @@ mod tests {
             response["choices"][0]["message"]["content"],
             "hello from the mock server"
         );
+    }
+
+    #[test]
+    fn embed_response_should_use_embeddings_endpoint_and_parse_vectors() {
+        let (embeddings_url, receiver) = start_mock_server_at_path(
+            "/v1/embeddings",
+            r#"{
+                "data":[
+                    {"index":1,"embedding":[1.0,2.0]},
+                    {"index":0,"embedding":[5.0,0.0]}
+                ]
+            }"#,
+            "application/json",
+        );
+        let base_url = embeddings_url.replace("/v1/embeddings", "/v1/chat/completions");
+        let settings = SettingsBuilder::new()
+            .runtime(Runtime::OpenAi)
+            .model("text-embedding-3-small")
+            .base_url(&base_url)
+            .api_key(Some("secret-token"))
+            .build();
+
+        let vectors = embed_response(&settings, &["hello".to_owned(), "world".to_owned()], true)
+            .expect("embedding request should succeed");
+        let observed_request = receiver
+            .recv()
+            .expect("mock server should observe the embedding request");
+
+        assert_eq!(
+            observed_request.authorization.as_deref(),
+            Some("Bearer secret-token")
+        );
+        assert_eq!(observed_request.body["model"], "text-embedding-3-small");
+        assert_eq!(observed_request.body["input"], json!(["hello", "world"]));
+        assert!((vectors[0][0] - 1.0).abs() < 1.0e-6);
+        assert!((vectors[0][1] - 0.0).abs() < 1.0e-6);
+        assert!((vectors[1][0] - 0.447_213_6).abs() < 1.0e-5);
+        assert!((vectors[1][1] - 0.894_427_2).abs() < 1.0e-5);
     }
 
     #[test]

@@ -1268,7 +1268,7 @@ mod postllm {
         inference::extract_text(response)
     }
 
-    /// Computes a local embedding using the Candle runtime and returns it as a `real[]`.
+    /// Computes an embedding using the active runtime and returns it as a `real[]`.
     #[pg_extern]
     fn embed(
         input: &str,
@@ -1278,7 +1278,7 @@ mod postllm {
         retrieval::embed(input, model, normalize)
     }
 
-    /// Computes local embeddings for multiple inputs and returns them as JSON.
+    /// Computes embeddings for multiple inputs using the active runtime and returns them as JSON.
     #[pg_extern]
     fn embed_many(
         inputs: Vec<String>,
@@ -2523,11 +2523,32 @@ fn model_alias_delete_impl(alias: &str, lane: &str) -> Result<Value> {
 
 fn embedding_model_info_impl(model: Option<&str>) -> Result<Value> {
     guc::ensure_active_privileged_settings_allowed()?;
-    let model = guc::resolve_embedding_model(model)?;
-    let candle_cache_dir = guc::resolve_candle_cache_dir();
-    let candle_offline = guc::resolve_candle_offline();
+    let settings = guc::resolve_embedding_settings(model)?;
 
-    candle::embedding_model_info(&model, candle_cache_dir.as_deref(), candle_offline)
+    match settings.runtime {
+        backend::Runtime::OpenAi => Ok(json!({
+            "runtime": settings.runtime.as_str(),
+            "model": settings.model,
+            "dimension": Value::Null,
+            "max_sequence_length": Value::Null,
+            "pooling": Value::Null,
+            "normalization": {
+                "default": "provider-defined",
+                "supported": ["provider-defined", "l2", "none"],
+            },
+            "metadata_source": "provider-defined",
+        })),
+        backend::Runtime::Candle => {
+            let candle_cache_dir = guc::resolve_candle_cache_dir();
+            let candle_offline = guc::resolve_candle_offline();
+
+            candle::embedding_model_info(
+                &settings.model,
+                candle_cache_dir.as_deref(),
+                candle_offline,
+            )
+        }
+    }
 }
 
 fn model_install_impl(model: Option<&str>, lane: Option<&str>) -> Result<Value> {
@@ -3134,7 +3155,9 @@ fn embed_many_impl(
                     .map(|input| require_non_blank("input", input).map(str::to_owned))
                     .collect::<Result<Vec<_>>>()
             },
-            |settings, validated_inputs| candle::embed(settings, &validated_inputs, normalize),
+            |settings, validated_inputs| {
+                backend::embed_response(settings, &validated_inputs, normalize)
+            },
             |vectors| embed_response_audit_payload(vectors, normalize),
         )
 }
@@ -6981,7 +7004,7 @@ mod tests {
         assert_eq!(capabilities["features"]["chat"]["available"], true);
         assert_eq!(capabilities["features"]["chat"]["runtime"], "openai");
         assert_eq!(capabilities["features"]["complete"]["available"], true);
-        assert_eq!(capabilities["features"]["embeddings"]["runtime"], "candle");
+        assert_eq!(capabilities["features"]["embeddings"]["runtime"], "openai");
         assert_eq!(capabilities["features"]["reranking"]["available"], true);
         assert_eq!(capabilities["features"]["tools"]["available"], true);
         assert_eq!(
@@ -7465,21 +7488,25 @@ mod tests {
     fn sql_embedding_model_info_should_report_default_metadata() {
         let info = sql_json("SELECT postllm.embedding_model_info()");
 
-        assert_eq!(info["runtime"], "candle");
+        assert_eq!(info["runtime"], "openai");
         assert_eq!(
             info["model"],
             "sentence-transformers/paraphrase-MiniLM-L3-v2"
         );
-        assert_eq!(info["architecture"], "bert");
-        assert_eq!(info["dimension"], 384);
-        assert_eq!(info["max_sequence_length"], 512);
-        assert_eq!(info["pooling"], "mean");
-        assert_eq!(info["normalization"]["default"], "l2");
-        assert_eq!(info["normalization"]["supported"], json!(["l2", "none"]));
+        assert_eq!(info["dimension"], Value::Null);
+        assert_eq!(info["max_sequence_length"], Value::Null);
+        assert_eq!(info["pooling"], Value::Null);
+        assert_eq!(info["normalization"]["default"], "provider-defined");
+        assert_eq!(
+            info["normalization"]["supported"],
+            json!(["provider-defined", "l2", "none"])
+        );
+        assert_eq!(info["metadata_source"], "provider-defined");
     }
 
     #[pg_test]
     fn sql_embedding_model_info_should_report_cls_pooling_for_bge() {
+        drop(sql_json("SELECT postllm.configure(runtime => 'candle')"));
         let info = sql_json("SELECT postllm.embedding_model_info('BAAI/bge-small-en-v1.5')");
 
         assert_eq!(info["runtime"], "candle");
@@ -7492,6 +7519,7 @@ mod tests {
 
     #[pg_test]
     fn sql_embedding_model_info_should_report_distiluse_projection() {
+        drop(sql_json("SELECT postllm.configure(runtime => 'candle')"));
         let info = sql_json(
             "SELECT postllm.embedding_model_info('sentence-transformers/distiluse-base-multilingual-cased-v2')",
         );
@@ -7665,7 +7693,7 @@ mod tests {
     fn sql_embed_should_reject_offline_cache_misses() {
         let cache_dir = fresh_test_cache_dir("offline-embed-miss");
         drop(sql_json(&format!(
-            "SELECT postllm.configure(candle_cache_dir => {}, candle_offline => true)",
+            "SELECT postllm.configure(runtime => 'candle', candle_cache_dir => {}, candle_offline => true)",
             sql_literal(&cache_dir)
         )));
 
@@ -9182,6 +9210,77 @@ mod tests {
             "person"
         );
         assert_eq!(request_body["max_output_tokens"], 32);
+    }
+
+    #[pg_test]
+    fn sql_embed_should_support_openai_runtime_embeddings() {
+        let (embeddings_url, receiver) = start_mock_json_server(
+            "/v1/embeddings",
+            r#"{
+                "data":[
+                    {"index":0,"embedding":[3.0,4.0]}
+                ]
+            }"#,
+        );
+        let base_url = embeddings_url.replace("/v1/embeddings", "/v1/chat/completions");
+
+        drop(sql_json(&format!(
+            "SELECT postllm.configure(
+                runtime => 'openai',
+                base_url => {},
+                embedding_model => 'text-embedding-3-small'
+            )",
+            sql_literal(&base_url)
+        )));
+
+        let vector = Spi::get_one::<Vec<f32>>("SELECT postllm.embed('hello from SQL')")
+            .expect("SPI should execute")
+            .expect("query should return a row");
+        let request_body = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("mock server should capture the embedding request");
+
+        assert_eq!(request_body["model"], "text-embedding-3-small");
+        assert_eq!(request_body["input"], json!(["hello from SQL"]));
+        assert!((vector[0] - 0.6).abs() < 1.0e-6);
+        assert!((vector[1] - 0.8).abs() < 1.0e-6);
+    }
+
+    #[pg_test]
+    fn sql_embed_many_should_support_openai_runtime_embeddings() {
+        let (embeddings_url, receiver) = start_mock_json_server(
+            "/v1/embeddings",
+            r#"{
+                "data":[
+                    {"index":1,"embedding":[1.0,2.0]},
+                    {"index":0,"embedding":[5.0,0.0]}
+                ]
+            }"#,
+        );
+        let base_url = embeddings_url.replace("/v1/embeddings", "/v1/responses");
+
+        drop(sql_json(&format!(
+            "SELECT postllm.configure(
+                runtime => 'openai',
+                base_url => {},
+                embedding_model => 'text-embedding-3-small'
+            )",
+            sql_literal(&base_url)
+        )));
+
+        let vectors = sql_json(
+            "SELECT postllm.embed_many(ARRAY['hello from SQL', 'world from SQL'], NULL, false)",
+        );
+        let request_body = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("mock server should capture the embedding request");
+
+        assert_eq!(request_body["model"], "text-embedding-3-small");
+        assert_eq!(
+            request_body["input"],
+            json!(["hello from SQL", "world from SQL"])
+        );
+        assert_eq!(vectors, json!([[5.0, 0.0], [1.0, 2.0]]));
     }
 
     #[pg_test]

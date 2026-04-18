@@ -5,10 +5,10 @@
 ## Runtime matrix
 
 - `openai` runtime is OpenAI-compatible HTTP.
-  - Pros: hosted model breadth, structured outputs, tools, streaming where provider supports it across both Chat Completions-style and Responses-style endpoints.
+  - Pros: hosted generation, embeddings, reranking, structured outputs, tools, and streaming where the provider supports them across both Chat Completions-style and Responses-style endpoints.
   - Constraints: network policy applies (`http_allowed_hosts`, `http_allowed_providers`), request latency depends on upstream.
 - `candle` runtime is local in-process Candle inference.
-  - Pros: local embeddings and starter generation models.
+  - Pros: local embeddings, reranking, and starter generation models.
   - Constraints: multimodal/tooling/streaming are not yet supported for local generation.
 
 ## OpenAI-compatible runtime
@@ -54,6 +54,8 @@ Hosted tool-calling and streaming are available on runtimes that support those f
 - a Responses-style endpoint such as `https://api.openai.com/v1/responses`
 
 The SQL API stays the same either way. `postllm` translates requests to the provider endpoint shape and normalizes the response back into the existing SQL-facing format.
+
+Hosted embedding calls use the same runtime profile. `postllm.embed(...)` and `postllm.embed_many(...)` derive a sibling `/v1/embeddings` endpoint from `postllm.base_url`, so one hosted profile can serve generation and embeddings together.
 
 ## Candle runtime
 

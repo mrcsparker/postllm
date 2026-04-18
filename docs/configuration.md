@@ -53,7 +53,7 @@ SELECT postllm.configure(
 );
 ```
 
-For hosted inference, `postllm.base_url` may target either a Chat Completions-style endpoint like `/v1/chat/completions` or a Responses-style endpoint like `/v1/responses`.
+For hosted inference, `postllm.base_url` may target either a Chat Completions-style endpoint like `/v1/chat/completions` or a Responses-style endpoint like `/v1/responses`. Embedding requests reuse that same profile and derive the sibling `/v1/embeddings` endpoint automatically, so `postllm.model` and `postllm.embedding_model` can live under one hosted session configuration.
 
 ## Request guardrails
 
