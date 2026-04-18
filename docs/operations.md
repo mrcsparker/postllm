@@ -103,7 +103,7 @@ Treat this as part of your architecture:
 
 - keep latency-sensitive SQL paths explicit.
 - gate runtime switches with permissions and allowlists.
-- use `postllm.request_token_budget`, `postllm.request_runtime_budget_ms`, and `postllm.request_spend_budget_microusd` when you need a hard operator ceiling on output size, wall-clock time, or estimated generated-output spend.
+- use `postllm.request_max_concurrency`, `postllm.request_token_budget`, `postllm.request_runtime_budget_ms`, and `postllm.request_spend_budget_microusd` when you need hard operator ceilings on concurrency, output size, wall-clock time, or estimated generated-output spend.
 - use `postllm.request_audit_log` only when you explicitly need audit visibility, and prefer redacted payload settings for routine production debugging.
 - when request logging is enabled, prefer `postllm.request_metrics`, `postllm.request_count_metrics`, `postllm.request_error_metrics`, `postllm.request_latency_metrics`, and `postllm.request_token_usage_metrics` for latency/error/token rollups instead of re-parsing JSON from the raw audit table.
 - use `runtime_discover()` and `runtime_ready()` in startup scripts.
@@ -123,11 +123,11 @@ Push model work out of the backend process when:
 
 - the request can run for a long time, fan out over many rows, or compete with core OLTP traffic.
 - you need queueing, retries, admission control, or cancellation semantics that belong in a worker tier rather than one SQL statement.
-- the workload is bursty enough that concurrent inference could starve normal database work even with `candle_max_concurrency` and request budgets in place.
+- the workload is bursty enough that concurrent inference could starve normal database work even with `request_max_concurrency`, `candle_max_concurrency`, and request budgets in place.
 - the application already has an async orchestration layer and PostgreSQL does not need to own the model call itself.
 
 ## Practical guidance
 
 - Prefer synchronous in-database inference for small, explicit, human-scale calls.
 - Prefer batch jobs or external workers for large backfills, long document pipelines, or user-facing hot paths with tight latency SLOs.
-- Start with conservative budgets and raise them intentionally: `request_runtime_budget_ms`, `request_token_budget`, `request_spend_budget_microusd`, and `candle_max_concurrency` are the first levers to reach for.
+- Start with conservative budgets and raise them intentionally: `request_max_concurrency`, `request_runtime_budget_ms`, `request_token_budget`, `request_spend_budget_microusd`, and `candle_max_concurrency` are the first levers to reach for.

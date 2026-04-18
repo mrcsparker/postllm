@@ -17,6 +17,12 @@ pub(crate) enum Error {
     #[error("postllm received an invalid argument: {0}")]
     InvalidInput(String),
 
+    /// A request could not start because the configured backpressure controls were saturated.
+    #[error(
+        "postllm request backpressure blocked execution: {0}; fix: lower concurrent model work or raise the relevant postllm concurrency setting"
+    )]
+    Backpressure(String),
+
     /// An HTTP request failed before the provider returned a response.
     #[error(
         "failed to call the configured LLM endpoint: {0}; fix: verify postllm.base_url, network access, and postllm.timeout_ms"

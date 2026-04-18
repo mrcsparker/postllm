@@ -20,6 +20,7 @@ pub(crate) const DEFAULT_EMBEDDING_MODEL: &str = "sentence-transformers/paraphra
 pub(crate) const DEFAULT_TIMEOUT_MS: i32 = 30_000;
 pub(crate) const DEFAULT_MAX_RETRIES: i32 = 2;
 pub(crate) const DEFAULT_RETRY_BACKOFF_MS: i32 = 250;
+pub(crate) const DEFAULT_REQUEST_MAX_CONCURRENCY: i32 = 0;
 pub(crate) const DEFAULT_REQUEST_TOKEN_BUDGET: i32 = 0;
 pub(crate) const DEFAULT_REQUEST_RUNTIME_BUDGET_MS: i32 = 0;
 pub(crate) const DEFAULT_REQUEST_SPEND_BUDGET_MICROUSD: i32 = 0;
@@ -39,10 +40,14 @@ const PROFILE_MANAGED_STRING_DEFAULTS: [(&str, &str); 7] = [
     ("postllm.api_key_secret", DEFAULT_API_KEY_SECRET),
     ("postllm.candle_device", DEFAULT_CANDLE_DEVICE),
 ];
-const PROFILE_MANAGED_INT_DEFAULTS: [(&str, i32); 9] = [
+const PROFILE_MANAGED_INT_DEFAULTS: [(&str, i32); 10] = [
     ("postllm.timeout_ms", DEFAULT_TIMEOUT_MS),
     ("postllm.max_retries", DEFAULT_MAX_RETRIES),
     ("postllm.retry_backoff_ms", DEFAULT_RETRY_BACKOFF_MS),
+    (
+        "postllm.request_max_concurrency",
+        DEFAULT_REQUEST_MAX_CONCURRENCY,
+    ),
     ("postllm.request_token_budget", DEFAULT_REQUEST_TOKEN_BUDGET),
     (
         "postllm.request_runtime_budget_ms",
@@ -80,6 +85,7 @@ static POSTLLM_API_KEY_SECRET: GucSetting<Option<CString>> =
 static POSTLLM_TIMEOUT_MS: GucSetting<i32> = GucSetting::<i32>::new(30_000);
 static POSTLLM_MAX_RETRIES: GucSetting<i32> = GucSetting::<i32>::new(2);
 static POSTLLM_RETRY_BACKOFF_MS: GucSetting<i32> = GucSetting::<i32>::new(250);
+static POSTLLM_REQUEST_MAX_CONCURRENCY: GucSetting<i32> = GucSetting::<i32>::new(0);
 static POSTLLM_REQUEST_TOKEN_BUDGET: GucSetting<i32> = GucSetting::<i32>::new(0);
 static POSTLLM_REQUEST_RUNTIME_BUDGET_MS: GucSetting<i32> = GucSetting::<i32>::new(0);
 static POSTLLM_REQUEST_SPEND_BUDGET_MICROUSD: GucSetting<i32> = GucSetting::<i32>::new(0);
@@ -107,6 +113,7 @@ struct ResolvedSettingInputs {
     timeout_ms: u64,
     max_retries: u32,
     retry_backoff_ms: u64,
+    request_max_concurrency: u32,
     http_allowed_hosts: Vec<String>,
     http_allowed_providers: Vec<String>,
     candle_cache_dir: Option<String>,
@@ -126,6 +133,7 @@ impl ResolvedSettingInputs {
             timeout_ms: self.timeout_ms,
             max_retries: self.max_retries,
             retry_backoff_ms: self.retry_backoff_ms,
+            request_max_concurrency: self.request_max_concurrency,
             http_allowed_hosts: self.http_allowed_hosts,
             http_allowed_providers: self.http_allowed_providers,
             candle_cache_dir: self.candle_cache_dir,
@@ -150,6 +158,7 @@ pub(crate) struct SessionOverrides {
     pub(crate) timeout_ms: Option<i32>,
     pub(crate) max_retries: Option<i32>,
     pub(crate) retry_backoff_ms: Option<i32>,
+    pub(crate) request_max_concurrency: Option<i32>,
     pub(crate) request_token_budget: Option<i32>,
     pub(crate) request_runtime_budget_ms: Option<i32>,
     pub(crate) request_spend_budget_microusd: Option<i32>,
@@ -176,6 +185,7 @@ impl SessionOverrides {
         timeout_ms: Option<i32>,
         max_retries: Option<i32>,
         retry_backoff_ms: Option<i32>,
+        request_max_concurrency: Option<i32>,
         request_token_budget: Option<i32>,
         request_runtime_budget_ms: Option<i32>,
         request_spend_budget_microusd: Option<i32>,
@@ -229,6 +239,11 @@ impl SessionOverrides {
                 "retry_backoff_ms",
                 retry_backoff_ms,
                 "pass zero to retry immediately or a positive integer number of milliseconds",
+            )?,
+            request_max_concurrency: sanitize_non_negative_int(
+                "request_max_concurrency",
+                request_max_concurrency,
+                "pass zero to disable the global request concurrency cap or a positive integer slot count",
             )?,
             request_token_budget: sanitize_non_negative_int(
                 "request_token_budget",
@@ -287,6 +302,7 @@ impl SessionOverrides {
             timeout_ms: parse_profile_int(object, "timeout_ms", false)?,
             max_retries: parse_profile_int(object, "max_retries", true)?,
             retry_backoff_ms: parse_profile_int(object, "retry_backoff_ms", true)?,
+            request_max_concurrency: parse_profile_int(object, "request_max_concurrency", true)?,
             request_token_budget: parse_profile_int(object, "request_token_budget", true)?,
             request_runtime_budget_ms: parse_profile_int(
                 object,
@@ -336,6 +352,11 @@ impl SessionOverrides {
         insert_optional_i32(&mut object, "timeout_ms", self.timeout_ms);
         insert_optional_i32(&mut object, "max_retries", self.max_retries);
         insert_optional_i32(&mut object, "retry_backoff_ms", self.retry_backoff_ms);
+        insert_optional_i32(
+            &mut object,
+            "request_max_concurrency",
+            self.request_max_concurrency,
+        );
         insert_optional_i32(
             &mut object,
             "request_token_budget",
@@ -489,6 +510,17 @@ fn register_hosted_runtime_gucs() {
 }
 
 fn register_request_guardrail_gucs() {
+    GucRegistry::define_int_guc(
+        c"postllm.request_max_concurrency",
+        c"Optional cap on concurrent postllm requests across PostgreSQL backends.",
+        c"When greater than zero, chat, complete, stream, embedding, and rerank requests must wait for one of this many global request slots before they can start runtime work.",
+        &POSTLLM_REQUEST_MAX_CONCURRENCY,
+        0,
+        512,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
     GucRegistry::define_int_guc(
         c"postllm.request_token_budget",
         c"Optional cap on generated output tokens per request.",
@@ -740,6 +772,7 @@ fn resolve_setting_inputs() -> Result<ResolvedSettingInputs> {
         timeout_ms: resolve_timeout_ms()?,
         max_retries: resolve_max_retries()?,
         retry_backoff_ms: resolve_retry_backoff_ms()?,
+        request_max_concurrency: resolve_request_max_concurrency()?,
         http_allowed_hosts: resolve_http_allowed_hosts()?,
         http_allowed_providers: resolve_http_allowed_providers()?,
         candle_cache_dir: string_setting(&POSTLLM_CANDLE_CACHE_DIR),
@@ -859,6 +892,16 @@ fn resolve_retry_backoff_ms() -> Result<u64> {
     })
 }
 
+fn resolve_request_max_concurrency() -> Result<u32> {
+    u32::try_from(POSTLLM_REQUEST_MAX_CONCURRENCY.get()).map_err(|_| {
+        Error::invalid_setting(
+            "postllm.request_max_concurrency",
+            "must be representable as a u32",
+            "SET postllm.request_max_concurrency = 0 to disable the cap or another non-negative integer",
+        )
+    })
+}
+
 fn resolve_candle_max_input_tokens() -> Result<u32> {
     u32::try_from(POSTLLM_CANDLE_MAX_INPUT_TOKENS.get()).map_err(|_| {
         Error::invalid_setting(
@@ -889,6 +932,7 @@ pub(crate) fn snapshot() -> Value {
         "timeout_ms": POSTLLM_TIMEOUT_MS.get(),
         "max_retries": POSTLLM_MAX_RETRIES.get(),
         "retry_backoff_ms": POSTLLM_RETRY_BACKOFF_MS.get(),
+        "request_max_concurrency": POSTLLM_REQUEST_MAX_CONCURRENCY.get(),
         "request_token_budget": POSTLLM_REQUEST_TOKEN_BUDGET.get(),
         "request_runtime_budget_ms": POSTLLM_REQUEST_RUNTIME_BUDGET_MS.get(),
         "request_spend_budget_microusd": POSTLLM_REQUEST_SPEND_BUDGET_MICROUSD.get(),
@@ -940,6 +984,7 @@ pub(crate) fn configure_session(
     timeout_ms: Option<i32>,
     max_retries: Option<i32>,
     retry_backoff_ms: Option<i32>,
+    request_max_concurrency: Option<i32>,
     request_token_budget: Option<i32>,
     request_runtime_budget_ms: Option<i32>,
     request_spend_budget_microusd: Option<i32>,
@@ -960,6 +1005,7 @@ pub(crate) fn configure_session(
         timeout_ms,
         max_retries,
         retry_backoff_ms,
+        request_max_concurrency,
         request_token_budget,
         request_runtime_budget_ms,
         request_spend_budget_microusd,
@@ -1065,6 +1111,12 @@ fn apply_hosted_runtime_overrides(overrides: &SessionOverrides) -> Result<()> {
         "retry_backoff_ms",
         overrides.retry_backoff_ms,
         DEFAULT_RETRY_BACKOFF_MS,
+    )?;
+    apply_optional_i32_override(
+        "postllm.request_max_concurrency",
+        "request_max_concurrency",
+        overrides.request_max_concurrency,
+        DEFAULT_REQUEST_MAX_CONCURRENCY,
     )?;
     apply_optional_i32_override(
         "postllm.request_token_budget",
@@ -1219,6 +1271,11 @@ pub(crate) fn ensure_active_privileged_settings_allowed() -> Result<()> {
         POSTLLM_RETRY_BACKOFF_MS.get(),
         DEFAULT_RETRY_BACKOFF_MS,
         "retry_backoff_ms",
+    )?;
+    ensure_non_default_i32_setting_allowed(
+        POSTLLM_REQUEST_MAX_CONCURRENCY.get(),
+        DEFAULT_REQUEST_MAX_CONCURRENCY,
+        "request_max_concurrency",
     )?;
     ensure_non_default_i32_setting_allowed(
         POSTLLM_REQUEST_TOKEN_BUDGET.get(),
@@ -1405,7 +1462,7 @@ fn sanitize_candle_device(value: Option<&str>) -> Result<Option<String>> {
 }
 
 fn validate_profile_keys(object: &Map<String, Value>) -> Result<()> {
-    const ALLOWED_KEYS: [&str; 17] = [
+    const ALLOWED_KEYS: [&str; 18] = [
         "base_url",
         "model",
         "embedding_model",
@@ -1413,6 +1470,7 @@ fn validate_profile_keys(object: &Map<String, Value>) -> Result<()> {
         "timeout_ms",
         "max_retries",
         "retry_backoff_ms",
+        "request_max_concurrency",
         "request_token_budget",
         "request_runtime_budget_ms",
         "request_spend_budget_microusd",

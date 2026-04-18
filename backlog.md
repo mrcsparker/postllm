@@ -39,6 +39,9 @@ Last manually verified in-repo on 2026-04-05:
 - 2026-04-17 follow-up: `cargo pgrx test pg17 sql_chat_should_inject_max_tokens_from_ -F pg_test` passed.
 - 2026-04-17 follow-up: `cargo pgrx test pg17 sql_chat_should_reject_max_tokens_above_request_token_budget -F pg_test` passed.
 - 2026-04-17 follow-up: `cargo pgrx test pg17 sql_chat_should_reject_spend_budget_without_output_token_price -F pg_test` passed.
+- 2026-04-17 follow-up: `cargo pgrx test pg17 sql_configure_should_ -F pg_test` passed.
+- 2026-04-17 follow-up: `cargo pgrx test pg17 sql_profile_ -F pg_test` passed.
+- 2026-04-17 follow-up: `cargo pgrx test pg17 sql_chat_should_ -F pg_test` passed.
 
 This snapshot confirms the current hosted `llama-server` Docker lane and the local Candle Docker lane are both green. Keep this section current when backlog status is updated so the plan stays anchored to a real checked state instead of a guessed one.
 
@@ -164,7 +167,7 @@ Issues:
 - [x] `PL-040` Add request logging and audit trails with opt-in prompt/response redaction.
 - [x] `PL-041` Add metrics views for latency, errors, token usage, and request counts.
 - [x] `PL-042` Add quotas and guardrails for token budget, runtime budget, and spend.
-- [ ] `PL-043` Add backpressure controls so concurrent model work cannot overwhelm the database.
+- [x] `PL-043` Add backpressure controls so concurrent model work cannot overwhelm the database.
 - [x] `PL-044` Document operational guidance for when inference inside PostgreSQL is appropriate and when it is not.
 
 ## Milestone 7: Async Workflows And Higher-Level Primitives

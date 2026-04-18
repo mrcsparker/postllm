@@ -5,10 +5,16 @@
 
 use crate::audit;
 use crate::backend::{self, Settings};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::guc;
+use pgrx::datum::DatumWithOid;
+use pgrx::spi::Spi;
 use serde_json::Value;
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration, Instant};
+
+pub(crate) const REQUEST_CONCURRENCY_LOCK_NAMESPACE: i32 = i32::from_be_bytes(*b"pllm");
+const REQUEST_CONCURRENCY_POLL_INTERVAL_MS: u64 = 25;
 
 /// Shared request requirements for generation-oriented entrypoints.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -102,6 +108,11 @@ impl ExecutionContext {
                 Some(resolved.model.as_str()),
             );
             capabilities.require(backend::Feature::Embeddings)?;
+            let _request_concurrency_slot = acquire_request_concurrency_slot(
+                resolved.request_max_concurrency,
+                resolved.timeout_ms,
+                self.operation,
+            )?;
             settings = Some(resolved);
 
             execute(
@@ -152,6 +163,11 @@ impl ExecutionContext {
         let mut settings = None;
         let result = (|| {
             let resolved = resolve_settings()?;
+            let _request_concurrency_slot = acquire_request_concurrency_slot(
+                resolved.request_max_concurrency,
+                resolved.timeout_ms,
+                self.operation,
+            )?;
             settings = Some(resolved);
 
             execute(settings.as_ref().expect("resolved settings should exist"))
@@ -209,4 +225,71 @@ fn redact_payload(payload: Value, redact: bool) -> Value {
     } else {
         payload
     }
+}
+
+struct RequestConcurrencySlotGuard {
+    slot: i32,
+}
+
+impl Drop for RequestConcurrencySlotGuard {
+    fn drop(&mut self) {
+        release_request_concurrency_slot(self.slot);
+    }
+}
+
+fn acquire_request_concurrency_slot(
+    max_concurrency: u32,
+    timeout_ms: u64,
+    operation: &str,
+) -> Result<Option<RequestConcurrencySlotGuard>> {
+    if max_concurrency == 0 {
+        return Ok(None);
+    }
+
+    let started_at = Instant::now();
+    loop {
+        crate::interrupt::checkpoint();
+        if started_at.elapsed() > Duration::from_millis(timeout_ms) {
+            return Err(Error::Backpressure(format!(
+                "request {operation} could not start because postllm.request_max_concurrency={max_concurrency} stayed saturated until postllm.timeout_ms={timeout_ms}ms elapsed"
+            )));
+        }
+
+        for slot in 0..max_concurrency {
+            let slot = i32::try_from(slot).map_err(|_| {
+                Error::invalid_setting(
+                    "postllm.request_max_concurrency",
+                    "must fit into PostgreSQL advisory lock slot identifiers",
+                    "SET postllm.request_max_concurrency = 512 or another smaller non-negative integer",
+                )
+            })?;
+
+            if try_acquire_request_concurrency_slot(slot)? {
+                return Ok(Some(RequestConcurrencySlotGuard { slot }));
+            }
+        }
+
+        thread::sleep(Duration::from_millis(REQUEST_CONCURRENCY_POLL_INTERVAL_MS));
+    }
+}
+
+fn try_acquire_request_concurrency_slot(slot: i32) -> Result<bool> {
+    Spi::get_one_with_args::<bool>(
+        "SELECT pg_try_advisory_lock($1, $2)",
+        &[
+            DatumWithOid::from(REQUEST_CONCURRENCY_LOCK_NAMESPACE),
+            DatumWithOid::from(slot),
+        ],
+    )?
+    .ok_or_else(|| Error::Internal("pg_try_advisory_lock did not return a result row".to_owned()))
+}
+
+fn release_request_concurrency_slot(slot: i32) {
+    let _ = Spi::get_one_with_args::<bool>(
+        "SELECT pg_advisory_unlock($1, $2)",
+        &[
+            DatumWithOid::from(REQUEST_CONCURRENCY_LOCK_NAMESPACE),
+            DatumWithOid::from(slot),
+        ],
+    );
 }

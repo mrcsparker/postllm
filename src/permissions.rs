@@ -14,13 +14,14 @@ use pgrx::spi::Spi;
 use serde_json::Value;
 
 const WILDCARD_TARGET: &str = "*";
-const PRIVILEGED_SETTINGS: [&str; 18] = [
+const PRIVILEGED_SETTINGS: [&str; 19] = [
     "base_url",
     "api_key",
     "api_key_secret",
     "timeout_ms",
     "max_retries",
     "retry_backoff_ms",
+    "request_max_concurrency",
     "request_token_budget",
     "request_runtime_budget_ms",
     "request_spend_budget_microusd",

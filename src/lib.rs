@@ -349,6 +349,7 @@ mod postllm {
         timeout_ms: default!(Option<i32>, "NULL"),
         max_retries: default!(Option<i32>, "NULL"),
         retry_backoff_ms: default!(Option<i32>, "NULL"),
+        request_max_concurrency: default!(Option<i32>, "NULL"),
         request_token_budget: default!(Option<i32>, "NULL"),
         request_runtime_budget_ms: default!(Option<i32>, "NULL"),
         request_spend_budget_microusd: default!(Option<i32>, "NULL"),
@@ -369,6 +370,7 @@ mod postllm {
             timeout_ms,
             max_retries,
             retry_backoff_ms,
+            request_max_concurrency,
             request_token_budget,
             request_runtime_budget_ms,
             request_spend_budget_microusd,
@@ -410,6 +412,7 @@ mod postllm {
         timeout_ms: default!(Option<i32>, "NULL"),
         max_retries: default!(Option<i32>, "NULL"),
         retry_backoff_ms: default!(Option<i32>, "NULL"),
+        request_max_concurrency: default!(Option<i32>, "NULL"),
         request_token_budget: default!(Option<i32>, "NULL"),
         request_runtime_budget_ms: default!(Option<i32>, "NULL"),
         request_spend_budget_microusd: default!(Option<i32>, "NULL"),
@@ -431,6 +434,7 @@ mod postllm {
             timeout_ms,
             max_retries,
             retry_backoff_ms,
+            request_max_concurrency,
             request_token_budget,
             request_runtime_budget_ms,
             request_spend_budget_microusd,
@@ -2174,6 +2178,7 @@ fn profile_set_impl(
     timeout_ms: Option<i32>,
     max_retries: Option<i32>,
     retry_backoff_ms: Option<i32>,
+    request_max_concurrency: Option<i32>,
     request_token_budget: Option<i32>,
     request_runtime_budget_ms: Option<i32>,
     request_spend_budget_microusd: Option<i32>,
@@ -2194,6 +2199,7 @@ fn profile_set_impl(
         timeout_ms,
         max_retries,
         retry_backoff_ms,
+        request_max_concurrency,
         request_token_budget,
         request_runtime_budget_ms,
         request_spend_budget_microusd,
@@ -5844,9 +5850,11 @@ mod tests {
     use std::env;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
+    use std::path::PathBuf;
+    use std::process::{Child, Command, Stdio};
     use std::sync::mpsc;
     use std::thread;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const DEFAULT_PG_TEST_CANDLE_MODEL: &str = "Qwen/Qwen2.5-0.5B-Instruct";
 
@@ -6012,6 +6020,79 @@ mod tests {
 
     fn set_local_role(role_name: &str) {
         sql_run(&format!("SET LOCAL ROLE {role_name}"));
+    }
+
+    struct PsqlSessionGuard {
+        child: Child,
+    }
+
+    impl Drop for PsqlSessionGuard {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    fn pg_test_psql_path() -> PathBuf {
+        let version = sql_text("SHOW server_version");
+        let candidate = env::var("HOME").ok().map(PathBuf::from).map(|home| {
+            home.join(".pgrx")
+                .join(version.trim())
+                .join("pgrx-install/bin/psql")
+        });
+
+        candidate
+            .filter(|path| path.is_file())
+            .unwrap_or_else(|| PathBuf::from("psql"))
+    }
+
+    fn spawn_request_concurrency_holder(slot: i32, sleep_seconds: u64) -> PsqlSessionGuard {
+        let socket_dir = sql_text("SHOW unix_socket_directories")
+            .split(',')
+            .next()
+            .expect("socket directory should be available")
+            .trim()
+            .to_owned();
+        let port = sql_text("SHOW port");
+        let database = sql_text("SELECT current_database()::text");
+        let user = sql_text("SELECT current_user::text");
+        let mut child = Command::new(pg_test_psql_path())
+            .args([
+                "-X",
+                "-q",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-h",
+                &socket_dir,
+                "-p",
+                &port,
+                "-U",
+                &user,
+                "-d",
+                &database,
+                "-c",
+                &format!(
+                    "SELECT pg_advisory_lock({}, {}); SELECT pg_sleep({sleep_seconds});",
+                    crate::execution::REQUEST_CONCURRENCY_LOCK_NAMESPACE,
+                    slot,
+                ),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("psql should start the lock-holder session");
+
+        thread::sleep(Duration::from_millis(250));
+        assert!(
+            child
+                .try_wait()
+                .expect("psql lock-holder status should be readable")
+                .is_none(),
+            "psql lock-holder exited before the test request ran"
+        );
+
+        PsqlSessionGuard { child }
     }
 
     fn start_mock_stream_server(response_body: &str) -> (String, mpsc::Receiver<Value>) {
@@ -6338,6 +6419,7 @@ mod tests {
         assert_eq!(settings["timeout_ms"], 30_000);
         assert_eq!(settings["max_retries"], 2);
         assert_eq!(settings["retry_backoff_ms"], 250);
+        assert_eq!(settings["request_max_concurrency"], 0);
         assert_eq!(settings["request_token_budget"], 0);
         assert_eq!(settings["request_runtime_budget_ms"], 0);
         assert_eq!(settings["request_spend_budget_microusd"], 0);
@@ -6575,6 +6657,7 @@ mod tests {
                 timeout_ms => 9000,
                 max_retries => 1,
                 retry_backoff_ms => 50,
+                request_max_concurrency => 4,
                 request_token_budget => 128,
                 request_runtime_budget_ms => 4000,
                 request_spend_budget_microusd => 750,
@@ -6596,6 +6679,7 @@ mod tests {
                 "timeout_ms": 9000,
                 "max_retries": 1,
                 "retry_backoff_ms": 50,
+                "request_max_concurrency": 4,
                 "request_token_budget": 128,
                 "request_runtime_budget_ms": 4000,
                 "request_spend_budget_microusd": 750,
@@ -6615,6 +6699,7 @@ mod tests {
         assert_eq!(applied["timeout_ms"], 9000);
         assert_eq!(applied["max_retries"], 1);
         assert_eq!(applied["retry_backoff_ms"], 50);
+        assert_eq!(applied["request_max_concurrency"], 4);
         assert_eq!(applied["request_token_budget"], 128);
         assert_eq!(applied["request_runtime_budget_ms"], 4000);
         assert_eq!(applied["request_spend_budget_microusd"], 750);
@@ -6629,6 +6714,7 @@ mod tests {
             "SELECT postllm.configure(
                 runtime => 'candle',
                 model => 'Qwen/Qwen2.5-0.5B-Instruct',
+                request_max_concurrency => 2,
                 request_token_budget => 64,
                 request_runtime_budget_ms => 5000,
                 request_spend_budget_microusd => 2500,
@@ -6663,6 +6749,7 @@ mod tests {
         assert_eq!(applied["has_api_key"], false);
         assert_eq!(applied["api_key_source"], "none");
         assert_eq!(applied["api_key_secret"], Value::Null);
+        assert_eq!(applied["request_max_concurrency"], 0);
         assert_eq!(applied["request_token_budget"], 0);
         assert_eq!(applied["request_runtime_budget_ms"], 0);
         assert_eq!(applied["request_spend_budget_microusd"], 0);
@@ -8314,7 +8401,7 @@ mod tests {
     #[pg_test]
     fn sql_configure_should_update_the_current_session() {
         let configured = sql_json(
-            "SELECT postllm.configure(model => 'pg-test-model', embedding_model => 'sentence-transformers/all-MiniLM-L6-v2', timeout_ms => 5000, max_retries => 4, retry_backoff_ms => 750, request_token_budget => 256, request_runtime_budget_ms => 4000, request_spend_budget_microusd => 1500, output_token_price_microusd_per_1k => 500000, candle_offline => true, candle_device => 'cpu', candle_max_input_tokens => 2048, candle_max_concurrency => 2)",
+            "SELECT postllm.configure(model => 'pg-test-model', embedding_model => 'sentence-transformers/all-MiniLM-L6-v2', timeout_ms => 5000, max_retries => 4, retry_backoff_ms => 750, request_max_concurrency => 6, request_token_budget => 256, request_runtime_budget_ms => 4000, request_spend_budget_microusd => 1500, output_token_price_microusd_per_1k => 500000, candle_offline => true, candle_device => 'cpu', candle_max_input_tokens => 2048, candle_max_concurrency => 2)",
         );
 
         assert_eq!(configured["model"], "pg-test-model");
@@ -8325,6 +8412,7 @@ mod tests {
         assert_eq!(configured["timeout_ms"], 5_000);
         assert_eq!(configured["max_retries"], 4);
         assert_eq!(configured["retry_backoff_ms"], 750);
+        assert_eq!(configured["request_max_concurrency"], 6);
         assert_eq!(configured["request_token_budget"], 256);
         assert_eq!(configured["request_runtime_budget_ms"], 4_000);
         assert_eq!(configured["request_spend_budget_microusd"], 1_500);
@@ -8418,6 +8506,45 @@ mod tests {
             "spend guardrail applied"
         );
         assert_eq!(request_body["max_tokens"], 3);
+    }
+
+    #[pg_test]
+    #[should_panic(
+        expected = "postllm request backpressure blocked execution: request chat could not start because postllm.request_max_concurrency=1 stayed saturated until postllm.timeout_ms=100ms elapsed"
+    )]
+    fn sql_chat_should_reject_saturated_global_request_concurrency() {
+        let (base_url, _receiver) = start_mock_json_server(
+            "/v1/chat/completions",
+            r#"{
+                "id":"chatcmpl-backpressure",
+                "object":"chat.completion",
+                "choices":[
+                    {
+                        "index":0,
+                        "message":{"role":"assistant","content":"should not be reached"},
+                        "finish_reason":"stop"
+                    }
+                ],
+                "usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}
+            }"#,
+        );
+
+        drop(sql_json(&format!(
+            "SELECT postllm.configure(
+                runtime => 'openai',
+                base_url => {},
+                model => 'mock-backpressure-model',
+                timeout_ms => 100,
+                request_max_concurrency => 1
+            )",
+            sql_literal(&base_url)
+        )));
+
+        let _holder = spawn_request_concurrency_holder(0, 5);
+
+        drop(Spi::get_one::<JsonB>(
+            "SELECT postllm.chat(ARRAY[postllm.user('blocked by backpressure')])",
+        ));
     }
 
     #[pg_test]
@@ -8999,6 +9126,16 @@ mod tests {
     fn sql_configure_should_reject_negative_max_retries() {
         drop(Spi::get_one::<JsonB>(
             "SELECT postllm.configure(max_retries => -1)",
+        ));
+    }
+
+    #[pg_test]
+    #[should_panic(
+        expected = "postllm received an invalid argument: argument 'request_max_concurrency' must be greater than or equal to zero, got -1; fix: pass zero to disable the global request concurrency cap or a positive integer slot count"
+    )]
+    fn sql_configure_should_reject_negative_request_max_concurrency() {
+        drop(Spi::get_one::<JsonB>(
+            "SELECT postllm.configure(request_max_concurrency => -1)",
         ));
     }
 
