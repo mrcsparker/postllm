@@ -23,7 +23,7 @@ RUN apt-get update \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --profile minimal --component clippy --component rustfmt
 
-RUN cargo install --locked cargo-pgrx --version 0.17.0
+RUN cargo install --locked cargo-pgrx --version 0.18.0
 
 RUN cargo pgrx init --pg17 /usr/lib/postgresql/17/bin/pg_config --no-run
 

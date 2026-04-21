@@ -197,6 +197,24 @@ SELECT postllm.chat_text(ARRAY[
 ], model => 'gpt-4o-mini');
 ```
 
+### Anthropic vision and tool use
+
+```sql
+SELECT postllm.configure(
+    runtime => 'openai',
+    base_url => 'https://api.anthropic.com/v1/messages',
+    model => 'claude-3-7-sonnet-latest',
+    api_key_secret => 'anthropic-prod'
+);
+
+SELECT postllm.chat_text(ARRAY[
+    postllm.user_parts(ARRAY[
+        postllm.image_url_part('https://example.com/cat.png'),
+        postllm.text_part('Describe this image in one sentence.')
+    ])
+]);
+```
+
 ### Response inspection
 
 ```sql

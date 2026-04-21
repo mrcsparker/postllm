@@ -5,7 +5,7 @@
 ## Runtime matrix
 
 - `openai` runtime is the hosted HTTP lane.
-  - Pros: OpenAI-compatible generation, embeddings, reranking, structured outputs, tools, and streaming, plus a native Anthropic Messages adapter for generation and streaming.
+  - Pros: OpenAI-compatible generation, embeddings, reranking, structured outputs, tools, and streaming, plus a native Anthropic Messages adapter for generation, streaming, tool use, and URL-based image inputs.
   - Constraints: network policy applies (`http_allowed_hosts`, `http_allowed_providers`), request latency depends on upstream.
 - `candle` runtime is local in-process Candle inference.
   - Pros: local embeddings, reranking, and starter generation models.
@@ -60,8 +60,8 @@ Hosted embedding calls use the same runtime profile. `postllm.embed(...)` and `p
 
 Current Anthropic adapter scope:
 
-- Supported: `chat*`, `complete*`, and streaming text generation.
-- Not yet supported: embeddings, reranking, tool-calling, structured outputs, and multimodal inputs.
+- Supported: `chat*`, `complete*`, streaming text generation, tool calling, and URL-based image inputs for vision-capable Claude models.
+- Not yet supported: embeddings, reranking, and structured outputs.
 
 Example Anthropic configuration:
 
@@ -139,3 +139,12 @@ Prefer:
 
 - `postllm.chat_text` for the happy path.
 - `postllm.chat` when full `_postllm` metadata is needed.
+
+`postllm.capabilities()` now also returns `model_features`, a best-effort model/profile view of:
+
+- `vision`
+- `json_mode`
+- `reasoning`
+- `tool_use`
+
+These flags are inferred from the configured provider and model name. Treat them as a planning signal for profile selection and guardrails, not as a replacement for provider-side validation.

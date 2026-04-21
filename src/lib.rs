@@ -7534,13 +7534,25 @@ mod tests {
             "embeddings are not implemented by the Anthropic adapter"
         );
         assert_eq!(capabilities["features"]["reranking"]["available"], false);
-        assert_eq!(capabilities["features"]["tools"]["available"], false);
+        assert_eq!(capabilities["features"]["tools"]["available"], true);
         assert_eq!(
             capabilities["features"]["structured_outputs"]["available"],
             false
         );
         assert_eq!(
             capabilities["features"]["multimodal_inputs"]["available"],
+            true
+        );
+        assert_eq!(
+            capabilities["model_features"]["features"]["vision"]["available"],
+            true
+        );
+        assert_eq!(
+            capabilities["model_features"]["features"]["tool_use"]["available"],
+            true
+        );
+        assert_eq!(
+            capabilities["model_features"]["features"]["json_mode"]["available"],
             false
         );
     }
@@ -9315,6 +9327,110 @@ mod tests {
             "Say hello."
         );
         assert_eq!(request_body["max_tokens"], 1024);
+    }
+
+    #[pg_test]
+    fn sql_chat_tools_should_support_anthropic_messages_api() {
+        let (base_url, receiver) = start_mock_json_server(
+            "/v1/messages",
+            r#"{
+                "id":"msg_tool",
+                "model":"claude-3-5-sonnet-latest",
+                "role":"assistant",
+                "stop_reason":"tool_use",
+                "content":[{"type":"tool_use","id":"toolu_123","name":"lookup_weather","input":{"city":"Austin"}}],
+                "usage":{"input_tokens":8,"output_tokens":6}
+            }"#,
+        );
+
+        drop(sql_json(&format!(
+            "SELECT postllm.configure(
+                runtime => 'openai',
+                base_url => {},
+                model => 'claude-3-5-sonnet-latest'
+            )",
+            sql_literal(&base_url)
+        )));
+
+        let response = sql_json(
+            r#"SELECT postllm.chat_tools(
+                ARRAY[postllm.user('Should I take an umbrella?')],
+                ARRAY[
+                    postllm.function_tool(
+                        'lookup_weather',
+                        '{
+                            "type":"object",
+                            "properties":{"city":{"type":"string"}},
+                            "required":["city"]
+                        }'::jsonb,
+                        description => 'Look up the weather.'
+                    )
+                ],
+                tool_choice => postllm.tool_choice_required()
+            )"#,
+        );
+        let request_body = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("mock server should capture the anthropic tool request");
+
+        assert_eq!(request_body["tools"][0]["name"], "lookup_weather");
+        assert_eq!(request_body["tool_choice"]["type"], "any");
+        assert_eq!(response["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(
+            response["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+            "lookup_weather"
+        );
+        assert_eq!(
+            response["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
+            "{\"city\":\"Austin\"}"
+        );
+    }
+
+    #[pg_test]
+    fn sql_chat_text_should_support_anthropic_multimodal_inputs() {
+        let (base_url, receiver) = start_mock_json_server(
+            "/v1/messages",
+            r#"{
+                "id":"msg_vision",
+                "model":"claude-3-7-sonnet-latest",
+                "role":"assistant",
+                "stop_reason":"end_turn",
+                "content":[{"type":"text","text":"It is a cat."}],
+                "usage":{"input_tokens":10,"output_tokens":4}
+            }"#,
+        );
+
+        drop(sql_json(&format!(
+            "SELECT postllm.configure(
+                runtime => 'openai',
+                base_url => {},
+                model => 'claude-3-7-sonnet-latest'
+            )",
+            sql_literal(&base_url)
+        )));
+
+        let response = sql_text(
+            "SELECT postllm.chat_text(ARRAY[
+                postllm.user_parts(ARRAY[
+                    postllm.image_url_part('https://example.com/cat.png'),
+                    postllm.text_part('Describe this image.')
+                ])
+            ])",
+        );
+        let request_body = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("mock server should capture the anthropic multimodal request");
+
+        assert_eq!(response, "It is a cat.");
+        assert_eq!(request_body["messages"][0]["content"][0]["type"], "image");
+        assert_eq!(
+            request_body["messages"][0]["content"][0]["source"]["type"],
+            "url"
+        );
+        assert_eq!(
+            request_body["messages"][0]["content"][0]["source"]["url"],
+            "https://example.com/cat.png"
+        );
     }
 
     #[pg_test]

@@ -271,6 +271,27 @@ impl Feature {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelFeature {
+    Vision,
+    JsonMode,
+    Reasoning,
+    ToolUse,
+}
+
+impl ModelFeature {
+    const ALL: [Self; 4] = [Self::Vision, Self::JsonMode, Self::Reasoning, Self::ToolUse];
+
+    const fn key(self) -> &'static str {
+        match self {
+            Self::Vision => "vision",
+            Self::JsonMode => "json_mode",
+            Self::Reasoning => "reasoning",
+            Self::ToolUse => "tool_use",
+        }
+    }
+}
+
 /// The current feature availability implied by the active settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CapabilitySnapshot {
@@ -326,11 +347,24 @@ impl CapabilitySnapshot {
             .into_iter()
             .map(|feature| (feature.key().to_owned(), self.feature(feature).snapshot()))
             .collect::<Map<String, Value>>();
+        let model_features = ModelFeature::ALL
+            .into_iter()
+            .map(|feature| {
+                (
+                    feature.key().to_owned(),
+                    self.model_feature(feature).snapshot(),
+                )
+            })
+            .collect::<Map<String, Value>>();
 
         json!({
             "runtime": self.runtime_setting,
             "model": self.model,
             "embedding_model": self.embedding_model,
+            "model_features": {
+                "source": "best-effort-name-inference",
+                "features": model_features,
+            },
             "features": features,
         })
     }
@@ -470,11 +504,18 @@ impl CapabilitySnapshot {
 
     fn multimodal_input_support(&self) -> FeatureSupport {
         if self.hosted_provider.as_deref() == Some(crate::http_policy::PROVIDER_ANTHROPIC) {
-            return FeatureSupport::unsupported(
-                self.runtime_setting.clone(),
-                self.model.clone(),
-                "multimodal inputs are not implemented by the Anthropic adapter".to_owned(),
-            );
+            let vision = self.model_feature(ModelFeature::Vision);
+            return if vision.available {
+                FeatureSupport::available(self.runtime_setting.clone(), self.model.clone())
+            } else {
+                FeatureSupport::unsupported(
+                    self.runtime_setting.clone(),
+                    self.model.clone(),
+                    vision.reason.unwrap_or_else(|| {
+                        "multimodal inputs are not implemented by the Anthropic adapter".to_owned()
+                    }),
+                )
+            };
         }
 
         match (self.runtime, self.model.as_deref()) {
@@ -536,11 +577,19 @@ impl CapabilitySnapshot {
 
     fn tool_support(&self) -> FeatureSupport {
         if self.hosted_provider.as_deref() == Some(crate::http_policy::PROVIDER_ANTHROPIC) {
-            return FeatureSupport::unsupported(
-                self.runtime_setting.clone(),
-                self.model.clone(),
-                "tool-calling requests are not implemented by the Anthropic adapter".to_owned(),
-            );
+            let tool_use = self.model_feature(ModelFeature::ToolUse);
+            return if tool_use.available {
+                FeatureSupport::available(self.runtime_setting.clone(), self.model.clone())
+            } else {
+                FeatureSupport::unsupported(
+                    self.runtime_setting.clone(),
+                    self.model.clone(),
+                    tool_use.reason.unwrap_or_else(|| {
+                        "tool-calling requests are not implemented by the Anthropic adapter"
+                            .to_owned()
+                    }),
+                )
+            };
         }
 
         match (self.runtime, self.model.as_deref()) {
@@ -585,6 +634,29 @@ impl CapabilitySnapshot {
             (None, _) => FeatureSupport::unsupported(
                 self.runtime_setting.clone(),
                 self.model.clone(),
+                self.runtime_error
+                    .clone()
+                    .unwrap_or_else(|| "postllm.runtime is not set".to_owned()),
+            ),
+        }
+    }
+
+    fn model_feature(&self, feature: ModelFeature) -> ModelFeatureSupport {
+        match (self.runtime, self.model.as_deref()) {
+            (Some(Runtime::OpenAi), Some(model))
+                if self.hosted_provider.as_deref()
+                    == Some(crate::http_policy::PROVIDER_ANTHROPIC) =>
+            {
+                anthropic_model_feature_support(model, feature)
+            }
+            (Some(Runtime::OpenAi), Some(model)) => hosted_model_feature_support(model, feature),
+            (Some(Runtime::Candle), Some(_)) => {
+                ModelFeatureSupport::unsupported(candle_model_feature_reason(feature))
+            }
+            (Some(_), None) => {
+                ModelFeatureSupport::unsupported("postllm.model is not set".to_owned())
+            }
+            (None, _) => ModelFeatureSupport::unsupported(
                 self.runtime_error
                     .clone()
                     .unwrap_or_else(|| "postllm.runtime is not set".to_owned()),
@@ -762,6 +834,166 @@ impl FeatureSupport {
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelFeatureSupport {
+    available: bool,
+    reason: Option<String>,
+}
+
+impl ModelFeatureSupport {
+    const fn available() -> Self {
+        Self {
+            available: true,
+            reason: None,
+        }
+    }
+
+    const fn unsupported(reason: String) -> Self {
+        Self {
+            available: false,
+            reason: Some(reason),
+        }
+    }
+
+    fn snapshot(&self) -> Value {
+        let mut object = Map::from_iter([("available".to_owned(), json!(self.available))]);
+
+        if let Some(reason) = self.reason.as_deref() {
+            object.insert("reason".to_owned(), json!(reason));
+        }
+
+        Value::Object(object)
+    }
+}
+
+fn hosted_model_feature_support(model: &str, feature: ModelFeature) -> ModelFeatureSupport {
+    match feature {
+        ModelFeature::Vision => {
+            if model_supports_hosted_vision(model) {
+                ModelFeatureSupport::available()
+            } else {
+                ModelFeatureSupport::unsupported(format!(
+                    "model '{model}' does not look like a vision-capable hosted model"
+                ))
+            }
+        }
+        ModelFeature::JsonMode | ModelFeature::ToolUse => ModelFeatureSupport::available(),
+        ModelFeature::Reasoning => {
+            if model_supports_reasoning(model) {
+                ModelFeatureSupport::available()
+            } else {
+                ModelFeatureSupport::unsupported(format!(
+                    "model '{model}' does not look like a reasoning-tuned hosted model"
+                ))
+            }
+        }
+    }
+}
+
+fn anthropic_model_feature_support(model: &str, feature: ModelFeature) -> ModelFeatureSupport {
+    match feature {
+        ModelFeature::Vision => {
+            if anthropic_model_supports_vision(model) {
+                ModelFeatureSupport::available()
+            } else {
+                ModelFeatureSupport::unsupported(format!(
+                    "model '{model}' does not advertise vision support on the Anthropic Messages API"
+                ))
+            }
+        }
+        ModelFeature::JsonMode => ModelFeatureSupport::unsupported(
+            "native JSON mode is not implemented by the Anthropic adapter".to_owned(),
+        ),
+        ModelFeature::Reasoning => {
+            if anthropic_model_supports_reasoning(model) {
+                ModelFeatureSupport::available()
+            } else {
+                ModelFeatureSupport::unsupported(format!(
+                    "model '{model}' does not look like an Anthropic extended-thinking model"
+                ))
+            }
+        }
+        ModelFeature::ToolUse => {
+            if anthropic_model_supports_tools(model) {
+                ModelFeatureSupport::available()
+            } else {
+                ModelFeatureSupport::unsupported(format!(
+                    "model '{model}' does not advertise tool use support on the Anthropic Messages API"
+                ))
+            }
+        }
+    }
+}
+
+fn candle_model_feature_reason(feature: ModelFeature) -> String {
+    match feature {
+        ModelFeature::Vision => {
+            "vision inputs are not implemented by the local Candle runtime".to_owned()
+        }
+        ModelFeature::JsonMode => {
+            "JSON mode is not implemented by the local Candle runtime".to_owned()
+        }
+        ModelFeature::Reasoning => {
+            "reasoning controls are not implemented by the local Candle runtime".to_owned()
+        }
+        ModelFeature::ToolUse => {
+            "tool use is not implemented by the local Candle runtime".to_owned()
+        }
+    }
+}
+
+fn model_supports_hosted_vision(model: &str) -> bool {
+    let normalized = model.to_ascii_lowercase();
+
+    contains_any_model_hint(
+        &normalized,
+        &[
+            "gpt-4o", "gpt-4.1", "gpt-4.5", "gpt-5", "vision", "llava", "vl",
+        ],
+    ) && !contains_any_model_hint(&normalized, &["embedding", "rerank"])
+}
+
+fn model_supports_reasoning(model: &str) -> bool {
+    let normalized = model.to_ascii_lowercase();
+
+    normalized.starts_with("o1")
+        || normalized.starts_with("o3")
+        || normalized.starts_with("o4")
+        || normalized.starts_with("gpt-5")
+        || normalized.contains("reasoning")
+}
+
+fn anthropic_model_supports_vision(model: &str) -> bool {
+    let normalized = model.to_ascii_lowercase();
+
+    if contains_any_model_hint(&normalized, &["haiku-3.5", "3-5-haiku", "3.5-haiku"]) {
+        return false;
+    }
+
+    contains_any_model_hint(
+        &normalized,
+        &["claude-3", "claude-4", "claude-sonnet-4", "claude-opus-4"],
+    )
+}
+
+fn anthropic_model_supports_reasoning(model: &str) -> bool {
+    let normalized = model.to_ascii_lowercase();
+
+    contains_any_model_hint(
+        &normalized,
+        &["3-7", "3.7", "sonnet-4", "opus-4", "4-1", "4.1"],
+    )
+}
+
+fn anthropic_model_supports_tools(model: &str) -> bool {
+    let normalized = model.to_ascii_lowercase();
+    contains_any_model_hint(&normalized, &["claude-3", "claude-4"])
+}
+
+fn contains_any_model_hint(normalized_model: &str, hints: &[&str]) -> bool {
+    hints.iter().any(|hint| normalized_model.contains(hint))
 }
 
 fn parse_runtime_setting(runtime_setting: Option<&str>) -> (Option<Runtime>, Option<String>) {
@@ -1110,6 +1342,73 @@ mod tests {
         assert_eq!(snapshot["features"]["reranking"]["runtime"], "openai");
         assert_eq!(snapshot["features"]["reranking"]["model"], "llama3.2");
         assert_eq!(snapshot["features"]["multimodal_inputs"]["available"], true);
+        assert_eq!(
+            snapshot["model_features"]["features"]["tool_use"]["available"],
+            true
+        );
+        assert_eq!(
+            snapshot["model_features"]["features"]["json_mode"]["available"],
+            true
+        );
+    }
+
+    #[test]
+    fn capability_snapshot_should_surface_anthropic_model_features() {
+        let snapshot = CapabilitySnapshot::from_settings(
+            &SettingsBuilder::new()
+                .runtime(Runtime::OpenAi)
+                .model("claude-3-7-sonnet-latest")
+                .base_url("https://api.anthropic.com/v1/messages")
+                .build(),
+            Some("text-embedding-3-small"),
+        )
+        .snapshot();
+
+        assert_eq!(snapshot["features"]["tools"]["available"], true);
+        assert_eq!(snapshot["features"]["multimodal_inputs"]["available"], true);
+        assert_eq!(
+            snapshot["model_features"]["features"]["vision"]["available"],
+            true
+        );
+        assert_eq!(
+            snapshot["model_features"]["features"]["reasoning"]["available"],
+            true
+        );
+        assert_eq!(
+            snapshot["model_features"]["features"]["tool_use"]["available"],
+            true
+        );
+        assert_eq!(
+            snapshot["model_features"]["features"]["json_mode"]["available"],
+            false
+        );
+    }
+
+    #[test]
+    fn capability_snapshot_should_mark_text_only_anthropic_models_as_non_vision() {
+        let snapshot = CapabilitySnapshot::from_settings(
+            &SettingsBuilder::new()
+                .runtime(Runtime::OpenAi)
+                .model("claude-3-5-haiku-latest")
+                .base_url("https://api.anthropic.com/v1/messages")
+                .build(),
+            Some("text-embedding-3-small"),
+        )
+        .snapshot();
+
+        assert_eq!(snapshot["features"]["tools"]["available"], true);
+        assert_eq!(
+            snapshot["features"]["multimodal_inputs"]["available"],
+            false
+        );
+        assert_eq!(
+            snapshot["model_features"]["features"]["vision"]["available"],
+            false
+        );
+        assert_eq!(
+            snapshot["model_features"]["features"]["vision"]["reason"],
+            "model 'claude-3-5-haiku-latest' does not advertise vision support on the Anthropic Messages API"
+        );
     }
 
     #[test]

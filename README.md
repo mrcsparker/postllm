@@ -62,7 +62,7 @@ For full signatures, use the grouped list in [docs/reference.md](./docs/referenc
 
 `postllm` exposes two runtime lanes:
 
-- `openai` for hosted HTTP APIs, including OpenAI-compatible Chat Completions, Responses-style generation, native Anthropic Messages, hosted embeddings, and hosted reranking.
+- `openai` for hosted HTTP APIs, including OpenAI-compatible Chat Completions, Responses-style generation, native Anthropic Messages, hosted embeddings, hosted reranking, Anthropic tool use, and Anthropic URL-based image inputs.
 - `candle` for local inference paths (starter generation, local embeddings, and local reranking).
 
 The SQL API shape is shared across runtimes; capability checks determine what arguments are valid in each lane.
@@ -87,10 +87,12 @@ Inference runs inside `PostgreSQL` backends. Before running in shared environmen
 
 ## Validation
 
-The repository includes two Docker end-to-end smoke suites:
+The repository includes Docker end-to-end smoke suites and a provider-compatibility matrix:
 
+- `./scripts/e2e_ollama.sh` for the hosted OpenAI-compatible lane via a real Ollama container
 - `./scripts/e2e_llama.sh` for the hosted OpenAI-compatible lane via `llama-server`
 - `./scripts/e2e_candle.sh` for the local Candle lane
+- `./scripts/e2e_compat.sh` to run the Ollama lane, the llama.cpp lane, and targeted OpenAI/Anthropic compatibility fixtures together
 
 They are documented in [docs/operations.md](./docs/operations.md#end-to-end-checks).
 

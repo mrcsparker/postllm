@@ -1,0 +1,18 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: postllm-ollama-e2e
+    volumes:
+      - ollama-cache:/root/.ollama
+
+  postgres:
+    container_name: postllm-pg17-ollama-e2e
+    depends_on:
+      - ollama
+    environment:
+      POSTLLM_RUNTIME: openai
+      POSTLLM_BASE_URL: http://ollama:11434/v1/chat/completions
+      POSTLLM_MODEL: ${POSTLLM_OLLAMA_MODEL:-llama3.2:1b-text-q4_K_M}
+
+volumes:
+  ollama-cache:

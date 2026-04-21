@@ -875,24 +875,27 @@ fn messages_to_anthropic_payload(messages: &[Value]) -> Result<(Option<String>, 
 
         match role {
             "system" => {
-                system_messages.push(stringify_anthropic_message_content(message.get("content"))?);
+                system_messages.push(stringify_anthropic_message_content(
+                    role,
+                    message.get("content"),
+                )?);
             }
-            "user" | "assistant" => anthropic_messages.push(json!({
-                "role": role,
-                "content": anthropic_message_content(message.get("content"))?,
-            })),
-            "tool" => {
-                return Err(Error::Unsupported(
-                    "tool result messages are not implemented by the Anthropic adapter".to_owned(),
-                ));
-            }
-            _ => return Err(Error::MalformedResponse),
-        }
+            "user" | "assistant" => {
+                let mut content = anthropic_message_content(role, message.get("content"))?;
 
-        if message.get("tool_calls").is_some() {
-            return Err(Error::Unsupported(
-                "assistant tool calls are not implemented by the Anthropic adapter".to_owned(),
-            ));
+                if role == "assistant"
+                    && let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array)
+                {
+                    append_anthropic_tool_use_blocks(&mut content, tool_calls)?;
+                }
+
+                anthropic_messages.push(json!({
+                    "role": role,
+                    "content": content,
+                }));
+            }
+            "tool" => anthropic_messages.push(anthropic_tool_result_message(message)?),
+            _ => return Err(Error::MalformedResponse),
         }
     }
 
@@ -901,7 +904,7 @@ fn messages_to_anthropic_payload(messages: &[Value]) -> Result<(Option<String>, 
     Ok((system, anthropic_messages))
 }
 
-fn anthropic_message_content(content: Option<&Value>) -> Result<Value> {
+fn anthropic_message_content(role: &str, content: Option<&Value>) -> Result<Value> {
     match content.unwrap_or(&Value::Null) {
         Value::String(text) => Ok(json!([{
             "type": "text",
@@ -909,16 +912,15 @@ fn anthropic_message_content(content: Option<&Value>) -> Result<Value> {
         }])),
         Value::Array(parts) => parts
             .iter()
-            .map(anthropic_message_part)
+            .map(|part| anthropic_message_part(role, part))
             .collect::<Result<Vec<Value>>>()
             .map(Value::Array),
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::Object(_) => {
-            Err(Error::MalformedResponse)
-        }
+        Value::Null => Ok(Value::Array(Vec::new())),
+        Value::Bool(_) | Value::Number(_) | Value::Object(_) => Err(Error::MalformedResponse),
     }
 }
 
-fn anthropic_message_part(part: &Value) -> Result<Value> {
+fn anthropic_message_part(role: &str, part: &Value) -> Result<Value> {
     let part_type = part
         .get("type")
         .and_then(Value::as_str)
@@ -932,14 +934,31 @@ fn anthropic_message_part(part: &Value) -> Result<Value> {
                 .and_then(Value::as_str)
                 .ok_or(Error::MalformedResponse)?,
         })),
+        "image_url" if role == "user" => {
+            let image_url = part
+                .get("image_url")
+                .and_then(Value::as_object)
+                .ok_or(Error::MalformedResponse)?;
+            Ok(json!({
+                "type": "image",
+                "source": {
+                    "type": "url",
+                    "url": image_url
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .ok_or(Error::MalformedResponse)?,
+                }
+            }))
+        }
         "image_url" => Err(Error::Unsupported(
-            "multimodal inputs are not implemented by the Anthropic adapter".to_owned(),
+            "image content parts are only supported in user messages on the Anthropic adapter"
+                .to_owned(),
         )),
         _ => Err(Error::MalformedResponse),
     }
 }
 
-fn stringify_anthropic_message_content(content: Option<&Value>) -> Result<String> {
+fn stringify_anthropic_message_content(role: &str, content: Option<&Value>) -> Result<String> {
     match content.unwrap_or(&Value::Null) {
         Value::String(text) => Ok(text.clone()),
         Value::Array(parts) => {
@@ -957,8 +976,12 @@ fn stringify_anthropic_message_content(content: Option<&Value>) -> Result<String
                             .and_then(Value::as_str)
                             .map(str::to_owned)
                             .ok_or(Error::MalformedResponse),
+                        "image_url" if role == "system" => Err(Error::Unsupported(
+                            "system prompts on the Anthropic adapter must stay text-only"
+                                .to_owned(),
+                        )),
                         "image_url" => Err(Error::Unsupported(
-                            "multimodal inputs are not implemented by the Anthropic adapter"
+                            "image content parts are only supported in user messages on the Anthropic adapter"
                                 .to_owned(),
                         )),
                         _ => Err(Error::MalformedResponse),
@@ -974,6 +997,121 @@ fn stringify_anthropic_message_content(content: Option<&Value>) -> Result<String
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::Object(_) => {
+            Err(Error::MalformedResponse)
+        }
+    }
+}
+
+fn anthropic_tool_result_message(message: &Value) -> Result<Value> {
+    Ok(json!({
+        "role": "user",
+        "content": [{
+            "type": "tool_result",
+            "tool_use_id": message
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .ok_or(Error::MalformedResponse)?,
+            "content": stringify_message_content(message.get("content"))?,
+        }],
+    }))
+}
+
+fn append_anthropic_tool_use_blocks(content: &mut Value, tool_calls: &[Value]) -> Result<()> {
+    let Value::Array(parts) = content else {
+        return Err(Error::MalformedResponse);
+    };
+
+    for tool_call in tool_calls {
+        let function = tool_call
+            .get("function")
+            .and_then(Value::as_object)
+            .ok_or(Error::MalformedResponse)?;
+        let input = parse_tool_call_arguments(
+            function
+                .get("arguments")
+                .and_then(Value::as_str)
+                .ok_or(Error::MalformedResponse)?,
+        )?;
+
+        parts.push(json!({
+            "type": "tool_use",
+            "id": tool_call
+                .get("id")
+                .cloned()
+                .unwrap_or(Value::Null),
+            "name": function
+                .get("name")
+                .cloned()
+                .ok_or(Error::MalformedResponse)?,
+            "input": input,
+        }));
+    }
+
+    Ok(())
+}
+
+fn parse_tool_call_arguments(arguments: &str) -> Result<Value> {
+    let parsed = serde_json::from_str::<Value>(arguments).map_err(|_| Error::MalformedResponse)?;
+
+    if parsed.is_object() {
+        Ok(parsed)
+    } else {
+        Err(Error::MalformedResponse)
+    }
+}
+
+fn anthropic_tools_payload(tools: &[Value]) -> Result<Vec<Value>> {
+    tools.iter().map(anthropic_tool_definition).collect()
+}
+
+fn anthropic_tool_definition(tool: &Value) -> Result<Value> {
+    let function = tool
+        .get("function")
+        .and_then(Value::as_object)
+        .ok_or(Error::MalformedResponse)?;
+    let mut anthropic_tool = json!({
+        "name": function
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or(Error::MalformedResponse)?,
+        "input_schema": function
+            .get("parameters")
+            .cloned()
+            .ok_or(Error::MalformedResponse)?,
+    });
+
+    if let Some(description) = function.get("description").and_then(Value::as_str)
+        && let Some(object) = anthropic_tool.as_object_mut()
+    {
+        object.insert("description".to_owned(), json!(description));
+    }
+
+    Ok(anthropic_tool)
+}
+
+fn anthropic_tool_choice_payload(tool_choice: Option<&Value>) -> Result<Option<Value>> {
+    match tool_choice {
+        None => Ok(None),
+        Some(Value::String(mode)) => match mode.as_str() {
+            "auto" => Ok(Some(json!({"type": "auto"}))),
+            "none" => Ok(Some(json!({"type": "none"}))),
+            "required" => Ok(Some(json!({"type": "any"}))),
+            _ => Err(Error::MalformedResponse),
+        },
+        Some(Value::Object(object)) => {
+            let name = object
+                .get("function")
+                .and_then(Value::as_object)
+                .and_then(|function| function.get("name"))
+                .and_then(Value::as_str)
+                .ok_or(Error::MalformedResponse)?;
+
+            Ok(Some(json!({
+                "type": "tool",
+                "name": name,
+            })))
+        }
+        Some(Value::Null | Value::Bool(_) | Value::Number(_) | Value::Array(_)) => {
             Err(Error::MalformedResponse)
         }
     }
@@ -1066,11 +1204,6 @@ fn build_anthropic_request_payload(
             "structured-output requests are not implemented by the Anthropic adapter".to_owned(),
         ));
     }
-    if tools.is_some() || tool_choice.is_some() {
-        return Err(Error::Unsupported(
-            "tool-calling requests are not implemented by the Anthropic adapter".to_owned(),
-        ));
-    }
 
     let (system, anthropic_messages) = messages_to_anthropic_payload(messages)?;
     let mut payload = json!({
@@ -1084,6 +1217,18 @@ fn build_anthropic_request_payload(
         && let Some(object) = payload.as_object_mut()
     {
         object.insert("system".to_owned(), json!(system));
+    }
+
+    if let Some(tools) = tools
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert("tools".to_owned(), json!(anthropic_tools_payload(tools)?));
+    }
+
+    if let Some(tool_choice) = anthropic_tool_choice_payload(tool_choice)?
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert("tool_choice".to_owned(), tool_choice);
     }
 
     Ok(payload)
@@ -2922,6 +3067,104 @@ mod tests {
     }
 
     #[test]
+    fn build_anthropic_request_payload_should_encode_image_parts_and_tools() {
+        let payload = build_anthropic_request_payload(
+            "claude-3-7-sonnet-latest",
+            &[json!({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "https://example.com/cat.png",
+                            "detail": "low"
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": "Describe this image."
+                    }
+                ]
+            })],
+            request_options(),
+            None,
+            Some(&[json!({
+                "type": "function",
+                "function": {
+                    "name": "describe_image",
+                    "description": "Describe an image.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "caption": {"type": "string"}
+                        },
+                        "required": ["caption"]
+                    }
+                }
+            })]),
+            Some(&json!("required")),
+        )
+        .expect("anthropic multimodal tool payload should build");
+
+        assert_eq!(payload["messages"][0]["content"][0]["type"], "image");
+        assert_eq!(
+            payload["messages"][0]["content"][0]["source"]["type"],
+            "url"
+        );
+        assert_eq!(
+            payload["messages"][0]["content"][0]["source"]["url"],
+            "https://example.com/cat.png"
+        );
+        assert_eq!(payload["tools"][0]["name"], "describe_image");
+        assert_eq!(payload["tools"][0]["input_schema"]["type"], "object");
+        assert_eq!(payload["tool_choice"]["type"], "any");
+    }
+
+    #[test]
+    fn build_anthropic_request_payload_should_encode_tool_history_messages() {
+        let payload = build_anthropic_request_payload(
+            "claude-3-5-sonnet-latest",
+            &[
+                json!({
+                    "role": "assistant",
+                    "content": Value::Null,
+                    "tool_calls": [{
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {
+                            "name": "lookup_weather",
+                            "arguments": "{\"city\":\"Austin\"}"
+                        }
+                    }]
+                }),
+                json!({
+                    "role": "tool",
+                    "tool_call_id": "call_123",
+                    "content": "{\"temperature_f\":72}"
+                }),
+            ],
+            request_options(),
+            None,
+            None,
+            None,
+        )
+        .expect("anthropic tool history payload should build");
+
+        assert_eq!(payload["messages"][0]["role"], "assistant");
+        assert_eq!(payload["messages"][0]["content"][0]["type"], "tool_use");
+        assert_eq!(
+            payload["messages"][0]["content"][0]["input"]["city"],
+            "Austin"
+        );
+        assert_eq!(payload["messages"][1]["role"], "user");
+        assert_eq!(payload["messages"][1]["content"][0]["type"], "tool_result");
+        assert_eq!(
+            payload["messages"][1]["content"][0]["tool_use_id"],
+            "call_123"
+        );
+    }
+
+    #[test]
     fn normalize_response_for_responses_should_produce_chat_completion_shape() {
         let normalized = normalize_response_for_endpoint(
             HostedEndpointFlavor::Responses,
@@ -2985,6 +3228,36 @@ mod tests {
         assert_eq!(normalized["usage"]["prompt_tokens"], 7);
         assert_eq!(normalized["usage"]["completion_tokens"], 5);
         assert_eq!(normalized["usage"]["total_tokens"], 12);
+    }
+
+    #[test]
+    fn normalize_response_for_anthropic_should_produce_tool_calls() {
+        let normalized = normalize_response_for_endpoint(
+            HostedEndpointFlavor::AnthropicMessages,
+            &json!({
+                "id": "msg_456",
+                "model": "claude-3-5-sonnet-latest",
+                "role": "assistant",
+                "stop_reason": "tool_use",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_123",
+                    "name": "lookup_weather",
+                    "input": {"city": "Austin"}
+                }]
+            }),
+        )
+        .expect("anthropic tool call response should normalize");
+
+        assert_eq!(normalized["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(
+            normalized["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+            "lookup_weather"
+        );
+        assert_eq!(
+            normalized["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
+            "{\"city\":\"Austin\"}"
+        );
     }
 
     #[test]
@@ -3170,6 +3443,117 @@ mod tests {
             "hello from anthropic"
         );
         assert_eq!(response["usage"]["total_tokens"], 12);
+    }
+
+    #[test]
+    fn chat_response_should_support_anthropic_tool_calls() {
+        let (base_url, receiver) = start_mock_server_at_path(
+            "/v1/messages",
+            r#"{
+                "id":"msg_123",
+                "model":"claude-3-5-sonnet-latest",
+                "role":"assistant",
+                "stop_reason":"tool_use",
+                "content":[{"type":"tool_use","id":"toolu_123","name":"lookup_weather","input":{"city":"Austin"}}],
+                "usage":{"input_tokens":8,"output_tokens":6}
+            }"#,
+            "application/json",
+        );
+        let messages = vec![json!({"role": "user", "content": "Should I take an umbrella?"})];
+        let tools = vec![json!({
+            "type": "function",
+            "function": {
+                "name": "lookup_weather",
+                "description": "Look up the weather.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"}
+                    },
+                    "required": ["city"]
+                }
+            }
+        })];
+        let settings = SettingsBuilder::new()
+            .runtime(Runtime::OpenAi)
+            .model("claude-3-5-sonnet-latest")
+            .base_url(&base_url)
+            .api_key(Some("secret-token"))
+            .build();
+
+        let response = chat_response(
+            &settings,
+            &messages,
+            request_options(),
+            None,
+            Some(&tools),
+            Some(&json!("required")),
+        )
+        .expect("anthropic tool request should succeed");
+        let observed_request = receiver
+            .recv()
+            .expect("mock server should observe the request");
+
+        assert_eq!(observed_request.body["tools"][0]["name"], "lookup_weather");
+        assert_eq!(observed_request.body["tool_choice"]["type"], "any");
+        assert_eq!(response["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(
+            response["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+            "lookup_weather"
+        );
+    }
+
+    #[test]
+    fn chat_response_should_support_anthropic_multimodal_inputs() {
+        let (base_url, receiver) = start_mock_server_at_path(
+            "/v1/messages",
+            r#"{
+                "id":"msg_vision",
+                "model":"claude-3-7-sonnet-latest",
+                "role":"assistant",
+                "stop_reason":"end_turn",
+                "content":[{"type":"text","text":"It is a cat."}],
+                "usage":{"input_tokens":10,"output_tokens":4}
+            }"#,
+            "application/json",
+        );
+        let settings = SettingsBuilder::new()
+            .runtime(Runtime::OpenAi)
+            .model("claude-3-7-sonnet-latest")
+            .base_url(&base_url)
+            .api_key(Some("secret-token"))
+            .build();
+        let messages = vec![json!({
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://example.com/cat.png"
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "Describe this image."
+                }
+            ]
+        })];
+
+        let response = chat_response(&settings, &messages, request_options(), None, None, None)
+            .expect("anthropic multimodal request should succeed");
+        let observed_request = receiver
+            .recv()
+            .expect("mock server should observe the request");
+
+        assert_eq!(
+            observed_request.body["messages"][0]["content"][0]["type"],
+            "image"
+        );
+        assert_eq!(
+            observed_request.body["messages"][0]["content"][0]["source"]["url"],
+            "https://example.com/cat.png"
+        );
+        assert_eq!(response["choices"][0]["message"]["content"], "It is a cat.");
     }
 
     #[test]

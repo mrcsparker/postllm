@@ -10,6 +10,8 @@ This page is grouped by domain so you can scan what you need quickly.
 - `postllm.runtime_ready() -> bool`
 - `postllm.configure(...) -> jsonb`
 
+`postllm.capabilities()` includes runtime-level `features` plus best-effort `model_features` for `vision`, `json_mode`, `reasoning`, and `tool_use`.
+
 ## Profiles
 
 - `postllm.profiles() -> jsonb`

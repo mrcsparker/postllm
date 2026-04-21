@@ -138,6 +138,7 @@ fn infer_openai_provider(base_url: Option<&str>) -> String {
     match (host, url.port_or_known_default()) {
         ("api.openai.com", _) => PROVIDER_OPENAI.to_owned(),
         ("api.anthropic.com", _) => PROVIDER_ANTHROPIC.to_owned(),
+        ("ollama", Some(11_434)) => PROVIDER_OLLAMA.to_owned(),
         ("127.0.0.1" | "localhost" | "host.docker.internal", Some(11_434)) => {
             PROVIDER_OLLAMA.to_owned()
         }
@@ -284,6 +285,19 @@ mod tests {
         assert_eq!(
             summary.discovery_url.as_deref(),
             Some("http://127.0.0.1:11434/v1/models")
+        );
+    }
+
+    #[test]
+    fn summarize_should_treat_the_ollama_service_name_as_ollama() {
+        let summary = summarize(&settings(Some("http://ollama:11434/v1/chat/completions")));
+
+        assert_eq!(summary.provider, "ollama");
+        assert_eq!(summary.base_url_host.as_deref(), Some("ollama"));
+        assert_eq!(summary.base_url_kind, Some("remote"));
+        assert_eq!(
+            summary.discovery_url.as_deref(),
+            Some("http://ollama:11434/v1/models")
         );
     }
 

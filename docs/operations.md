@@ -41,9 +41,17 @@ For local embeddings, environment variables in the container image include:
 Run the Docker smoke suites from the repository root:
 
 ```bash
+./scripts/e2e_ollama.sh
 ./scripts/e2e_llama.sh
 ./scripts/e2e_candle.sh
+./scripts/e2e_compat.sh
 ```
+
+`e2e_ollama.sh` validates the hosted OpenAI-compatible lane against a real Ollama container. A passing run proves that:
+
+- the extension can talk to Ollama through the OpenAI-compatible chat-completions surface,
+- `postllm.runtime_discover()` and `postllm.runtime_ready()` both succeed for an Ollama-backed profile, and
+- `postllm.complete(...)` returns a non-empty response from a pulled Ollama model.
 
 `e2e_llama.sh` validates the hosted OpenAI-compatible lane against the bundled `llama-server` container. A passing run proves that:
 
@@ -60,21 +68,34 @@ Run the Docker smoke suites from the repository root:
 - `postllm.chat(...)` and `postllm.complete(...)` return usable generation output, and
 - `postllm.ingest_document(...)` is idempotent across repeated runs.
 
+`e2e_compat.sh` is the aggregate compatibility runner. It executes:
+
+- the real Ollama smoke lane,
+- the real llama.cpp/`llama-server` smoke lane, and
+- targeted `pg_test` compatibility fixtures for OpenAI Responses and Anthropic Messages features.
+
 Common script controls:
 
 ```bash
+POSTLLM_PG_PORT=5543 ./scripts/e2e_ollama.sh
 POSTLLM_PG_PORT=5541 ./scripts/e2e_llama.sh
 POSTLLM_PG_PORT=5542 ./scripts/e2e_candle.sh
 POSTLLM_E2E_KEEP=1 ./scripts/e2e_candle.sh
+POSTLLM_OLLAMA_MODEL=llama3.2:1b-text-q4_K_M ./scripts/e2e_ollama.sh
+POSTLLM_COMPAT_SKIP_OLLAMA=1 ./scripts/e2e_compat.sh
 ```
 
 - `POSTLLM_PG_PORT` overrides the published PostgreSQL port for the Docker stack.
+- `POSTLLM_OLLAMA_MODEL` chooses which Ollama model is pulled for the real compatibility lane.
 - `POSTLLM_E2E_KEEP=1` keeps the Docker services running after the script exits so you can inspect logs or connect with `psql`.
+- `POSTLLM_COMPAT_SKIP_OLLAMA`, `POSTLLM_COMPAT_SKIP_LLAMA`, and `POSTLLM_COMPAT_SKIP_PG_TESTS` let you narrow the aggregate matrix to one slice when debugging.
 
 Success is reported explicitly at the end of each run:
 
+- `Ollama end-to-end smoke test passed.`
 - `llama-server end-to-end smoke test passed.`
 - `Candle end-to-end smoke test passed.`
+- `Compatibility matrix passed.`
 
 ## Quality gates
 
