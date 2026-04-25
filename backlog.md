@@ -218,8 +218,8 @@ Issues:
 - [x] `PL-056` Add a real CI matrix across supported PostgreSQL versions and major operating systems.
 - [x] `PL-057` Add release automation for extension artifacts, Docker images, and changelogs.
 - [x] `PL-058` Add migration-safe extension upgrade coverage.
-- [ ] `PL-059` Add a cookbook with copy-paste examples for local chat, hosted chat, embeddings, RAG, structured outputs, and tools.
-- [ ] `PL-060` Add a polished demo path and sample app that gets a new user from clone to success in under ten minutes.
+- [x] `PL-059` Add a cookbook with copy-paste examples for local chat, hosted chat, embeddings, RAG, structured outputs, and tools.
+- [x] `PL-060` Add a polished demo path and sample app that gets a new user from clone to success in under ten minutes.
 
 ## Release Gate: Code Quality And Maintainability
 
@@ -245,14 +245,14 @@ Issues:
 - [x] `PL-063` Reduce repetitive `Settings` construction and test fixture boilerplate across Rust unit tests and `pg_test` coverage with shared builders/helpers.
 - [x] `PL-064` Break up long SQL entrypoint and helper functions in `src/lib.rs` so each function does one thing and cross-cutting concerns are pushed into narrower modules.
 - [x] `PL-065` Standardize operator-policy code around one obvious pattern for secrets, permissions, network policy, quotas, and future governance controls.
-- [ ] `PL-066` Add a concrete naming, comments, and dead-code cleanup pass using a fixed rubric for:
+- [x] `PL-066` Add a concrete naming, comments, and dead-code cleanup pass using a fixed rubric for:
   - public/internal API names
   - module boundaries and single-responsibility ownership
   - removal of dead utility functions
   - readability of SQL entrypoint and policy modules
 - [x] `PL-067` Split `src/lib.rs` into bounded API surface modules (`api_config`, `api_messages`, `api_inference`, `api_retrieval`, `api_ops`) and keep each function file small and intention-revealing.
 - [x] `PL-077` Move SQL-facing API wrappers into `src/api/` (`config`, `messages`, `inference`, `retrieval`, `ops`) and remove `crate::api_*`-style call sites.
-- [ ] `PL-078` Consolidate repetitive enum parse/`Display` patterns (`Runtime`, `CandleDevice`, `ModelAliasLane`, `PermissionObjectType`, retrieval/scoping enums) into helper traits/macros or derive-based implementations to reduce duplicated matching and error text drift; target at least 300 lines deleted and clearer parser ownership.
+- [x] `PL-078` Consolidate repetitive enum parse/`Display` patterns (`Runtime`, `CandleDevice`, `ModelAliasLane`, `PermissionObjectType`, retrieval/scoping enums) into helper traits/macros or derive-based implementations to reduce duplicated matching and error text drift; target at least 300 lines deleted and clearer parser ownership.
 - [x] `PL-068` Introduce a single `ExecutionContext` type for request lifecycle (`resolve -> validate -> enforce policy -> call runtime`) to remove duplicated logic in request entrypoints.
 - [ ] `PL-069` Extract shared SQL builder/lookup helpers from `guc`, `permissions`, `secrets`, and `catalog` into a common internal module to avoid duplicated SPI/error path patterns.
 - [x] `PL-070` Add a dedicated architecture map for request and permission flows to help future reviewers reason about control flow quickly.

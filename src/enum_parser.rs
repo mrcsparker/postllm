@@ -1,9 +1,55 @@
 #![allow(
     clippy::redundant_pub_crate,
-    reason = "this helper module stays crate-private but intentionally uses crate-visible exports"
+    reason = "crate-private helper modules use pub(crate) to satisfy unreachable_pub without exporting APIs"
 )]
 
 use crate::error::{Error, Result};
+
+macro_rules! canonical_string_enum {
+    ($type:ty { $($label:expr => $variant:path),+ $(,)? }) => {
+        impl $type {
+            const VARIANTS: &'static [(&'static str, Self)] = &[$(($label, $variant)),+];
+
+            /// Returns the canonical configuration string for this value.
+            #[must_use]
+            pub(crate) const fn as_str(self) -> &'static str {
+                match self {
+                    $($variant => $label),+
+                }
+            }
+        }
+
+        impl core::fmt::Display for $type {
+            fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                formatter.write_str(self.as_str())
+            }
+        }
+    };
+}
+
+pub(crate) use canonical_string_enum;
+
+macro_rules! display_string_enum {
+    ($visibility:vis $type:ty { $($label:expr => $variant:path),+ $(,)? }) => {
+        impl $type {
+            /// Returns the canonical string for this value.
+            #[must_use]
+            $visibility const fn as_str(self) -> &'static str {
+                match self {
+                    $($variant => $label),+
+                }
+            }
+        }
+
+        impl core::fmt::Display for $type {
+            fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                formatter.write_str(self.as_str())
+            }
+        }
+    };
+}
+
+pub(crate) use display_string_enum;
 
 /// Returns the normalized, canonical representation used for enum matching.
 #[must_use]
@@ -36,8 +82,10 @@ pub(crate) fn parse_case_insensitive_optional<T: Copy>(
     parse_case_insensitive(value, variants).ok()
 }
 
-/// Parses a value using `parse_case_insensitive_required` semantics.
-/// Returns a standardized invalid-argument error when the input is blank or invalid.
+/// Parses a required enum value and returns a standardized invalid-argument error.
+///
+/// Blank input is rejected before variant matching so callers get an actionable
+/// "missing value" diagnostic instead of a generic "unknown variant" response.
 pub(crate) fn parse_case_insensitive_required<T: Copy>(
     argument: &str,
     value: &str,
@@ -114,7 +162,7 @@ pub(crate) fn parse_case_insensitive_with_default_error<T: Copy>(
     clippy::expect_used,
     reason = "unit tests use expect-style assertions for clearer failure context"
 )]
-mod test {
+mod tests {
     use super::format_variant_values;
     use super::parse_case_insensitive;
     use super::parse_case_insensitive_optional;

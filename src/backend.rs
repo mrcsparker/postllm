@@ -21,23 +21,17 @@ pub(crate) enum Runtime {
 impl Runtime {
     pub(crate) const OPENAI: &'static str = "openai";
     pub(crate) const CANDLE: &'static str = "candle";
-    const VARIANTS: [(&'static str, Self); 2] =
-        [(Self::OPENAI, Self::OpenAi), (Self::CANDLE, Self::Candle)];
-
-    /// Returns the canonical configuration string for this runtime.
-    #[must_use]
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::OpenAi => Self::OPENAI,
-            Self::Candle => Self::CANDLE,
-        }
-    }
 
     /// Parses a user-supplied runtime string.
     pub(crate) fn parse(value: &str) -> Result<Self> {
-        enum_parser::parse_case_insensitive_with_default_error("runtime", value, &Self::VARIANTS)
+        enum_parser::parse_case_insensitive_with_default_error("runtime", value, Self::VARIANTS)
     }
 }
+
+enum_parser::canonical_string_enum!(Runtime {
+    Runtime::OPENAI => Runtime::OpenAi,
+    Runtime::CANDLE => Runtime::Candle,
+});
 
 /// Preferred execution device for local Candle requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,30 +52,20 @@ impl CandleDevice {
     pub(crate) const CUDA: &'static str = "cuda";
     pub(crate) const METAL: &'static str = "metal";
     pub(crate) const ACCEPTED_VALUES: &'static str = "'auto', 'cpu', 'cuda', or 'metal'";
-    const VARIANTS: [(&'static str, Self); 4] = [
-        (Self::AUTO, Self::Auto),
-        (Self::CPU, Self::Cpu),
-        (Self::CUDA, Self::Cuda),
-        (Self::METAL, Self::Metal),
-    ];
-
-    /// Returns the canonical configuration string for this device preference.
-    #[must_use]
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Auto => Self::AUTO,
-            Self::Cpu => Self::CPU,
-            Self::Cuda => Self::CUDA,
-            Self::Metal => Self::METAL,
-        }
-    }
 
     /// Parses a user-supplied Candle device preference.
     #[must_use]
     pub(crate) fn parse(value: &str) -> Option<Self> {
-        enum_parser::parse_case_insensitive_optional(value, &Self::VARIANTS)
+        enum_parser::parse_case_insensitive_optional(value, Self::VARIANTS)
     }
 }
+
+enum_parser::canonical_string_enum!(CandleDevice {
+    CandleDevice::AUTO => CandleDevice::Auto,
+    CandleDevice::CPU => CandleDevice::Cpu,
+    CandleDevice::CUDA => CandleDevice::Cuda,
+    CandleDevice::METAL => CandleDevice::Metal,
+});
 
 /// Resolved runtime settings for one request.
 #[derive(Debug, Clone, PartialEq, Eq)]

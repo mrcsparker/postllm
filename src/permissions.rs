@@ -49,27 +49,18 @@ impl PermissionObjectType {
     pub(crate) const GENERATION_MODEL: &'static str = "generation_model";
     pub(crate) const EMBEDDING_MODEL: &'static str = "embedding_model";
     pub(crate) const SETTING: &'static str = "setting";
-    const VARIANTS: [(&'static str, Self); 4] = [
-        (Self::RUNTIME, Self::Runtime),
-        (Self::GENERATION_MODEL, Self::GenerationModel),
-        (Self::EMBEDDING_MODEL, Self::EmbeddingModel),
-        (Self::SETTING, Self::Setting),
-    ];
-
-    #[must_use]
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Runtime => Self::RUNTIME,
-            Self::GenerationModel => Self::GENERATION_MODEL,
-            Self::EmbeddingModel => Self::EMBEDDING_MODEL,
-            Self::Setting => Self::SETTING,
-        }
-    }
 
     pub(crate) fn parse(argument: &str, value: &str) -> Result<Self> {
-        enum_parser::parse_case_insensitive_required(argument, value, &Self::VARIANTS)
+        enum_parser::parse_case_insensitive_required(argument, value, Self::VARIANTS)
     }
 }
+
+enum_parser::canonical_string_enum!(PermissionObjectType {
+    PermissionObjectType::RUNTIME => PermissionObjectType::Runtime,
+    PermissionObjectType::GENERATION_MODEL => PermissionObjectType::GenerationModel,
+    PermissionObjectType::EMBEDDING_MODEL => PermissionObjectType::EmbeddingModel,
+    PermissionObjectType::SETTING => PermissionObjectType::Setting,
+});
 
 pub(crate) fn permissions() -> Result<Value> {
     json_query(

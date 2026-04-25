@@ -36,13 +36,25 @@ SELECT postllm.chat_text(ARRAY[
 ]);
 ```
 
+## Demo App
+
+Run the bundled support-triage demo to start `PostgreSQL`, start a local `llama.cpp` runtime, seed a tiny app schema, and draft one grounded response:
+
+```bash
+./scripts/demo_quickstart.sh
+```
+
+Use `POSTLLM_DEMO_KEEP=1 ./scripts/demo_quickstart.sh` if you want to inspect the demo tables afterward.
+
 ## Where to read first
 
 Choose one path based on your role:
 
 - **Trying it out quickly** → [getting-started](./docs/getting-started.md)
+- **Running the sample app** → [demo](./docs/demo.md)
 - **Configuring security/governance** → [configuration](./docs/configuration.md)
 - **Choosing a runtime model** → [runtime](./docs/runtime.md)
+- **Copy-pasting a full workflow** → [cookbook](./docs/cookbook.md)
 - **Debugging and deployment** → [operations](./docs/operations.md)
 - **Understanding the architecture** → [architecture](./docs/architecture.md)
 - **Finding every function** → [reference](./docs/reference.md)
@@ -101,4 +113,6 @@ They are documented in [docs/operations.md](./docs/operations.md#end-to-end-chec
 Deeper topic docs:
 
 - [Local Candle roadmap](./docs/candle-roadmap.md)
+- [Cookbook recipes](./docs/cookbook.md)
+- [Demo app](./docs/demo.md)
 - [pgvector integration](./docs/pgvector-integration.md)

@@ -3,6 +3,7 @@
     reason = "this module exposes crate-private APIs across sibling modules"
 )]
 
+use crate::enum_parser;
 use crate::error::{Error, Result};
 use crate::operator_policy;
 use pgrx::JsonB;
@@ -39,16 +40,14 @@ impl EvalScorer {
             )),
         }
     }
-
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::ExactText => SCORER_EXACT_TEXT,
-            Self::ContainsText => SCORER_CONTAINS_TEXT,
-            Self::ExactJson => SCORER_EXACT_JSON,
-            Self::JsonSubset => SCORER_JSON_SUBSET,
-        }
-    }
 }
+
+enum_parser::display_string_enum!(EvalScorer {
+    SCORER_EXACT_TEXT => EvalScorer::ExactText,
+    SCORER_CONTAINS_TEXT => EvalScorer::ContainsText,
+    SCORER_EXACT_JSON => EvalScorer::ExactJson,
+    SCORER_JSON_SUBSET => EvalScorer::JsonSubset,
+});
 
 pub(crate) fn datasets() -> Result<Value> {
     let created_by = operator_policy::caller_role_name();

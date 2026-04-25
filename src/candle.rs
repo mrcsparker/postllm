@@ -123,14 +123,10 @@ pub(crate) enum LocalModelLane {
     Generation,
 }
 
-impl LocalModelLane {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Embedding => "embedding",
-            Self::Generation => "generation",
-        }
-    }
-}
+enum_parser::display_string_enum!(pub(crate) LocalModelLane {
+    "embedding" => LocalModelLane::Embedding,
+    "generation" => LocalModelLane::Generation,
+});
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LocalModelEvictionScope {
@@ -140,24 +136,16 @@ pub(crate) enum LocalModelEvictionScope {
 }
 
 impl LocalModelEvictionScope {
-    const VARIANTS: [(&'static str, Self); 3] = [
-        ("memory", Self::Memory),
-        ("disk", Self::Disk),
-        ("all", Self::All),
-    ];
-
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Memory => "memory",
-            Self::Disk => "disk",
-            Self::All => "all",
-        }
-    }
-
     pub(crate) fn parse(value: &str) -> Result<Self> {
-        enum_parser::parse_case_insensitive_with_default_error("scope", value, &Self::VARIANTS)
+        enum_parser::parse_case_insensitive_with_default_error("scope", value, Self::VARIANTS)
     }
 }
+
+enum_parser::canonical_string_enum!(LocalModelEvictionScope {
+    "memory" => LocalModelEvictionScope::Memory,
+    "disk" => LocalModelEvictionScope::Disk,
+    "all" => LocalModelEvictionScope::All,
+});
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EmbeddingArchitecture {
@@ -167,14 +155,6 @@ enum EmbeddingArchitecture {
 }
 
 impl EmbeddingArchitecture {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Bert => "bert",
-            Self::DistilBert => "distilbert",
-            Self::XlmRoberta => "xlm-roberta",
-        }
-    }
-
     fn from_config_json(model_id: &str, config_json: &Value) -> Result<Self> {
         if let Some(model_type) = config_json.get("model_type").and_then(Value::as_str) {
             if let Some(architecture) = Self::from_model_type(model_type) {
@@ -222,6 +202,12 @@ impl EmbeddingArchitecture {
         }
     }
 }
+
+enum_parser::display_string_enum!(EmbeddingArchitecture {
+    "bert" => EmbeddingArchitecture::Bert,
+    "distilbert" => EmbeddingArchitecture::DistilBert,
+    "xlm-roberta" => EmbeddingArchitecture::XlmRoberta,
+});
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct EmbeddingModelSpec {
@@ -385,13 +371,6 @@ enum EmbeddingProjectionActivation {
 }
 
 impl EmbeddingProjectionActivation {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Identity => "identity",
-            Self::Tanh => "tanh",
-        }
-    }
-
     fn from_sentence_transformer(value: Option<&str>) -> Result<Self> {
         match value.map(str::trim).filter(|value| !value.is_empty()) {
             None => Ok(Self::Identity),
@@ -411,6 +390,11 @@ impl EmbeddingProjectionActivation {
         }
     }
 }
+
+enum_parser::display_string_enum!(EmbeddingProjectionActivation {
+    "identity" => EmbeddingProjectionActivation::Identity,
+    "tanh" => EmbeddingProjectionActivation::Tanh,
+});
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[expect(
@@ -609,15 +593,11 @@ enum LocalModelFileIntegrityStatus {
     Unchecked,
 }
 
-impl LocalModelFileIntegrityStatus {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Verified => "verified",
-            Self::Mismatch => "mismatch",
-            Self::Unchecked => "unchecked",
-        }
-    }
-}
+enum_parser::display_string_enum!(LocalModelFileIntegrityStatus {
+    "verified" => LocalModelFileIntegrityStatus::Verified,
+    "mismatch" => LocalModelFileIntegrityStatus::Mismatch,
+    "unchecked" => LocalModelFileIntegrityStatus::Unchecked,
+});
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct LocalModelIntegritySummary {
@@ -652,14 +632,6 @@ enum ResolvedCandleDeviceKind {
 }
 
 impl ResolvedCandleDeviceKind {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Cpu => "cpu",
-            Self::Cuda => "cuda",
-            Self::Metal => "metal",
-        }
-    }
-
     const fn accelerated(self) -> bool {
         !matches!(self, Self::Cpu)
     }
@@ -668,6 +640,12 @@ impl ResolvedCandleDeviceKind {
         if self.accelerated() { Some(0) } else { None }
     }
 }
+
+enum_parser::display_string_enum!(ResolvedCandleDeviceKind {
+    "cpu" => ResolvedCandleDeviceKind::Cpu,
+    "cuda" => ResolvedCandleDeviceKind::Cuda,
+    "metal" => ResolvedCandleDeviceKind::Metal,
+});
 
 #[derive(Debug, Clone)]
 struct ResolvedCandleDevice {
@@ -2315,14 +2293,10 @@ enum ChecksumAlgorithm {
     GitBlobSha1,
 }
 
-impl ChecksumAlgorithm {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Sha256 => "sha256",
-            Self::GitBlobSha1 => "git_blob_sha1",
-        }
-    }
-}
+enum_parser::display_string_enum!(ChecksumAlgorithm {
+    "sha256" => ChecksumAlgorithm::Sha256,
+    "git_blob_sha1" => ChecksumAlgorithm::GitBlobSha1,
+});
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ChecksumSpec {

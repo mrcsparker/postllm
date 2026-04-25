@@ -1767,24 +1767,16 @@ enum RagRetrievalStrategy {
 }
 
 impl RagRetrievalStrategy {
-    const VARIANTS: [(&'static str, Self); 3] = [
-        ("hybrid", Self::Hybrid),
-        ("semantic", Self::Semantic),
-        ("keyword", Self::Keyword),
-    ];
-
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Hybrid => "hybrid",
-            Self::Semantic => "semantic",
-            Self::Keyword => "keyword",
-        }
-    }
-
     fn parse(value: &str) -> Result<Self> {
-        enum_parser::parse_case_insensitive_required("retrieval", value, &Self::VARIANTS)
+        enum_parser::parse_case_insensitive_required("retrieval", value, Self::VARIANTS)
     }
 }
+
+enum_parser::canonical_string_enum!(RagRetrievalStrategy {
+    "hybrid" => RagRetrievalStrategy::Hybrid,
+    "semantic" => RagRetrievalStrategy::Semantic,
+    "keyword" => RagRetrievalStrategy::Keyword,
+});
 
 #[derive(Debug, Clone, PartialEq)]
 struct RagContextRow {

@@ -24,23 +24,16 @@ pub(crate) enum ModelAliasLane {
 impl ModelAliasLane {
     pub(crate) const GENERATION: &'static str = "generation";
     pub(crate) const EMBEDDING: &'static str = "embedding";
-    const VARIANTS: [(&'static str, Self); 2] = [
-        (Self::GENERATION, Self::Generation),
-        (Self::EMBEDDING, Self::Embedding),
-    ];
-
-    #[must_use]
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Generation => Self::GENERATION,
-            Self::Embedding => Self::EMBEDDING,
-        }
-    }
 
     pub(crate) fn parse(argument: &str, value: &str) -> Result<Self> {
-        enum_parser::parse_case_insensitive_required(argument, value, &Self::VARIANTS)
+        enum_parser::parse_case_insensitive_required(argument, value, Self::VARIANTS)
     }
 }
+
+enum_parser::canonical_string_enum!(ModelAliasLane {
+    ModelAliasLane::GENERATION => ModelAliasLane::Generation,
+    ModelAliasLane::EMBEDDING => ModelAliasLane::Embedding,
+});
 
 /// Resolves a model alias for the requested lane, if one exists.
 pub(crate) fn resolve_model_alias(alias: &str, lane: ModelAliasLane) -> Result<Option<String>> {
