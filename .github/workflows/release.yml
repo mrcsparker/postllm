@@ -1,0 +1,169 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing git tag to release, for example v0.1.0
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  PGRX_VERSION: 0.18.0
+
+jobs:
+  package-extension:
+    name: Package PG${{ matrix.pg_major }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pg_major: "13"
+            pg_flag: --pg13
+          - pg_major: "14"
+            pg_flag: --pg14
+          - pg_major: "15"
+            pg_flag: --pg15
+          - pg_major: "16"
+            pg_flag: --pg16
+          - pg_major: "17"
+            pg_flag: --pg17
+          - pg_major: "18"
+            pg_flag: --pg18
+    env:
+      PGRX_HOME: ${{ runner.temp }}/pgrx-${{ matrix.pg_major }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.PGRX_HOME }}
+          key: release-${{ runner.os }}-pgrx-${{ env.PGRX_VERSION }}-pg${{ matrix.pg_major }}
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential \
+            clang \
+            libclang-dev \
+            pkg-config \
+            libssl-dev \
+            libreadline-dev \
+            zlib1g-dev \
+            flex \
+            bison \
+            libxml2-dev \
+            libxslt1-dev \
+            libxml2-utils \
+            xsltproc
+
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --locked --version "${PGRX_VERSION}"
+
+      - name: Initialize PostgreSQL ${{ matrix.pg_major }}
+        run: cargo pgrx init ${{ matrix.pg_flag }} download
+
+      - name: Package release artifact
+        run: ./scripts/package_release_artifact.sh "${{ matrix.pg_major }}" "${{ github.workspace }}/target_ci/release-assets"
+
+      - name: Upload packaged extension
+        uses: actions/upload-artifact@v4
+        with:
+          name: postllm-pg${{ matrix.pg_major }}-linux-x86_64
+          path: |
+            target_ci/release-assets/dist/*.tar.gz
+            target_ci/release-assets/dist/*.sha256
+          if-no-files-found: error
+
+  publish-docker:
+    name: Publish Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+
+      - name: Compute image metadata
+        id: meta
+        shell: bash
+        run: |
+          owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          tag="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}"
+          version="${tag#v}"
+          tag_lines="ghcr.io/${owner}/postllm:${tag}"$'\n'"ghcr.io/${owner}/postllm:${version}"
+
+          if [[ "${tag}" != *-* ]]; then
+            tag_lines+=$'\n'"ghcr.io/${owner}/postllm:latest"
+          fi
+
+          {
+            echo "image=ghcr.io/${owner}/postllm"
+            echo "tag=${tag}"
+            echo "version=${version}"
+            echo 'tags<<EOF'
+            printf '%s\n' "${tag_lines}"
+            echo 'EOF'
+          } >> "${GITHUB_OUTPUT}"
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.pg17
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+
+  publish-release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - package-extension
+      - publish-docker
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: postllm-pg*-linux-x86_64
+          merge-multiple: true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ contains(github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name, '-') }}
+          files: dist/*

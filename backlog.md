@@ -215,9 +215,9 @@ Issues:
 - [x] `PL-053` Add native adapters for important providers that are not truly OpenAI-compatible.
 - [x] `PL-054` Add multimodal inputs and model feature flags for vision, JSON mode, reasoning, and tool use.
 - [x] `PL-055` Add compatibility tests across Ollama, llama.cpp, OpenAI, and at least one non-OpenAI hosted provider.
-- [ ] `PL-056` Add a real CI matrix across supported PostgreSQL versions and major operating systems.
-- [ ] `PL-057` Add release automation for extension artifacts, Docker images, and changelogs.
-- [ ] `PL-058` Add migration-safe extension upgrade coverage.
+- [x] `PL-056` Add a real CI matrix across supported PostgreSQL versions and major operating systems.
+- [x] `PL-057` Add release automation for extension artifacts, Docker images, and changelogs.
+- [x] `PL-058` Add migration-safe extension upgrade coverage.
 - [ ] `PL-059` Add a cookbook with copy-paste examples for local chat, hosted chat, embeddings, RAG, structured outputs, and tools.
 - [ ] `PL-060` Add a polished demo path and sample app that gets a new user from clone to success in under ten minutes.
 

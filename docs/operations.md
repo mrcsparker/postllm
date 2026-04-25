@@ -108,6 +108,36 @@ env PGRX_HOME=/tmp/postllm-pgrx-home cargo clippy --all-targets --no-default-fea
 env PGRX_HOME=/tmp/postllm-pgrx-home CARGO_TARGET_DIR=/tmp/postllm-target cargo pgrx test pg17
 ```
 
+GitHub Actions runs the corresponding repository gate in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml). The workflow is split deliberately:
+
+- `quality` on Ubuntu with PostgreSQL 17 runs `cargo fmt --check`, strict Clippy, `cargo test --lib`, a focused `pg_test` smoke slice, and extension upgrade coverage.
+- `postgres-compile-matrix` builds the crate across PostgreSQL 13 through 18 on Ubuntu so every advertised feature flag stays live.
+- `postgres-smoke-matrix` runs focused `pg_test` smoke checks on PostgreSQL 16 and 18, with PostgreSQL 17 already covered by `quality`.
+- `os-build-matrix` runs cross-platform build checks on macOS and Windows against PostgreSQL 17 so non-Linux regressions are caught before release.
+
+The upgrade check is available locally:
+
+```bash
+./scripts/check_extension_upgrade.sh 17
+```
+
+By default it validates the initial release path by creating a synthetic empty `0.0.0` extension and upgrading into the current packaged SQL. Future release-to-release checks can add `tests/upgrade/postllm--<old-version>.sql` fixtures and matching `sql/postllm--<old-version>--<current-version>.sql` migration scripts, then call the same script with the old version.
+
+## Release automation
+
+Release automation lives in [`.github/workflows/release.yml`](../.github/workflows/release.yml) and [`.github/workflows/release-drafter.yml`](../.github/workflows/release-drafter.yml).
+
+- Pushing a `v*.*.*` tag packages extension artifacts for PostgreSQL 13 through 18 on Linux and uploads them to the GitHub Release.
+- The same release workflow builds and pushes the PostgreSQL 17 runtime image to `ghcr.io/<owner>/postllm` for both `linux/amd64` and `linux/arm64`.
+- GitHub Release notes are generated automatically when the tagged release is published.
+- `release-drafter.yml` keeps a draft changelog current on `main` so upcoming release notes stay visible before a tag is cut.
+
+The packaged extension helper is also available for local dry runs:
+
+```bash
+./scripts/package_release_artifact.sh 17
+```
+
 Optional local Candle coverage:
 
 ```bash

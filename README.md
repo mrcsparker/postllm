@@ -93,6 +93,8 @@ The repository includes Docker end-to-end smoke suites and a provider-compatibil
 - `./scripts/e2e_llama.sh` for the hosted OpenAI-compatible lane via `llama-server`
 - `./scripts/e2e_candle.sh` for the local Candle lane
 - `./scripts/e2e_compat.sh` to run the Ollama lane, the llama.cpp lane, and targeted OpenAI/Anthropic compatibility fixtures together
+- `.github/workflows/ci.yml` for the GitHub Actions quality gate and cross-version/platform matrix
+- `.github/workflows/release.yml` and `.github/workflows/release-drafter.yml` for tagged release artifacts, GHCR publishing, and automated release notes
 
 They are documented in [docs/operations.md](./docs/operations.md#end-to-end-checks).
 

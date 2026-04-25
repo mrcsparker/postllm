@@ -1,0 +1,275 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  PGRX_VERSION: 0.18.0
+
+jobs:
+  quality:
+    name: Quality (Ubuntu, PG17)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CI_PG_MAJOR: "17"
+      CI_PG_FEATURE: pg17
+      CI_PG_FLAG: --pg17
+      PGRX_HOME: ${{ runner.temp }}/pgrx-17
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.PGRX_HOME }}
+          key: ${{ runner.os }}-pgrx-${{ env.PGRX_VERSION }}-pg${{ env.CI_PG_MAJOR }}
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential \
+            clang \
+            libclang-dev \
+            pkg-config \
+            libssl-dev \
+            libreadline-dev \
+            zlib1g-dev \
+            flex \
+            bison \
+            libxml2-dev \
+            libxslt1-dev \
+            libxml2-utils \
+            xsltproc
+
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --locked --version "${PGRX_VERSION}"
+
+      - name: Initialize PostgreSQL ${{ env.CI_PG_MAJOR }}
+        run: cargo pgrx init ${{ env.CI_PG_FLAG }} download
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets --no-default-features --features ${{ env.CI_PG_FEATURE }},pg_test --locked -- -D warnings
+
+      - name: Run library tests
+        run: cargo test --lib --locked --no-default-features --features ${{ env.CI_PG_FEATURE }}
+
+      - name: Run pg_test smoke checks
+        run: |
+          cargo pgrx test pg${CI_PG_MAJOR} sql_settings_should_report_defaults -F pg_test
+          cargo pgrx test pg${CI_PG_MAJOR} sql_configure_should_update_the_current_session -F pg_test
+          cargo pgrx test pg${CI_PG_MAJOR} sql_capabilities_should_report_default_runtime_and_embeddings -F pg_test
+
+      - name: Run extension upgrade smoke check
+        run: ./scripts/check_extension_upgrade.sh "${CI_PG_MAJOR}"
+
+  postgres-compile-matrix:
+    name: Build PG${{ matrix.pg_major }} (Ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pg_major: "13"
+            pg_feature: pg13
+            pg_flag: --pg13
+          - pg_major: "14"
+            pg_feature: pg14
+            pg_flag: --pg14
+          - pg_major: "15"
+            pg_feature: pg15
+            pg_flag: --pg15
+          - pg_major: "16"
+            pg_feature: pg16
+            pg_flag: --pg16
+          - pg_major: "17"
+            pg_feature: pg17
+            pg_flag: --pg17
+          - pg_major: "18"
+            pg_feature: pg18
+            pg_flag: --pg18
+    env:
+      CI_PG_MAJOR: ${{ matrix.pg_major }}
+      CI_PG_FEATURE: ${{ matrix.pg_feature }}
+      CI_PG_FLAG: ${{ matrix.pg_flag }}
+      PGRX_HOME: ${{ runner.temp }}/pgrx-${{ matrix.pg_major }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.PGRX_HOME }}
+          key: ${{ runner.os }}-pgrx-${{ env.PGRX_VERSION }}-pg${{ env.CI_PG_MAJOR }}
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential \
+            clang \
+            libclang-dev \
+            pkg-config \
+            libssl-dev \
+            libreadline-dev \
+            zlib1g-dev \
+            flex \
+            bison \
+            libxml2-dev \
+            libxslt1-dev \
+            libxml2-utils \
+            xsltproc
+
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --locked --version "${PGRX_VERSION}"
+
+      - name: Initialize PostgreSQL ${{ env.CI_PG_MAJOR }}
+        run: cargo pgrx init ${{ env.CI_PG_FLAG }} download
+
+      - name: Build feature set
+        run: cargo check --locked --no-default-features --features ${{ env.CI_PG_FEATURE }}
+
+  postgres-smoke-matrix:
+    name: pg_test PG${{ matrix.pg_major }} (Ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pg_major: "16"
+            pg_feature: pg16
+            pg_flag: --pg16
+          - pg_major: "18"
+            pg_feature: pg18
+            pg_flag: --pg18
+    env:
+      CI_PG_MAJOR: ${{ matrix.pg_major }}
+      CI_PG_FEATURE: ${{ matrix.pg_feature }}
+      CI_PG_FLAG: ${{ matrix.pg_flag }}
+      PGRX_HOME: ${{ runner.temp }}/pgrx-${{ matrix.pg_major }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.PGRX_HOME }}
+          key: ${{ runner.os }}-pgrx-${{ env.PGRX_VERSION }}-pg${{ env.CI_PG_MAJOR }}
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential \
+            clang \
+            libclang-dev \
+            pkg-config \
+            libssl-dev \
+            libreadline-dev \
+            zlib1g-dev \
+            flex \
+            bison \
+            libxml2-dev \
+            libxslt1-dev \
+            libxml2-utils \
+            xsltproc
+
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --locked --version "${PGRX_VERSION}"
+
+      - name: Initialize PostgreSQL ${{ env.CI_PG_MAJOR }}
+        run: cargo pgrx init ${{ env.CI_PG_FLAG }} download
+
+      - name: Run pg_test smoke checks
+        run: |
+          cargo pgrx test pg${CI_PG_MAJOR} sql_settings_should_report_defaults -F pg_test
+          cargo pgrx test pg${CI_PG_MAJOR} sql_configure_should_update_the_current_session -F pg_test
+          cargo pgrx test pg${CI_PG_MAJOR} sql_capabilities_should_report_default_runtime_and_embeddings -F pg_test
+
+  os-build-matrix:
+    name: Build ${{ matrix.os_name }} (PG17)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            os_name: macOS
+            shell: bash
+          - os: windows-latest
+            os_name: Windows
+            shell: pwsh
+    env:
+      CI_PG_MAJOR: "17"
+      CI_PG_FEATURE: pg17
+      CI_PG_FLAG: --pg17
+      PGRX_HOME: ${{ runner.temp }}/pgrx-17
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.PGRX_HOME }}
+          key: ${{ runner.os }}-pgrx-${{ env.PGRX_VERSION }}-pg${{ env.CI_PG_MAJOR }}
+
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install icu4c pkg-config
+          echo "PKG_CONFIG_PATH=$(brew --prefix icu4c)/lib/pkgconfig" >> "${GITHUB_ENV}"
+
+      - name: Install Windows build dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install llvm --yes --no-progress
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PATH=C:\Program Files\LLVM\bin;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install cargo-pgrx
+        shell: ${{ matrix.shell }}
+        run: cargo install cargo-pgrx --locked --version "${{ env.PGRX_VERSION }}"
+
+      - name: Initialize PostgreSQL ${{ env.CI_PG_MAJOR }}
+        shell: ${{ matrix.shell }}
+        run: cargo pgrx init ${{ env.CI_PG_FLAG }} download
+
+      - name: Build feature set
+        shell: ${{ matrix.shell }}
+        run: cargo check --locked --no-default-features --features ${{ env.CI_PG_FEATURE }}

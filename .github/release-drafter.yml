@@ -1,0 +1,89 @@
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+template: |
+  ## Changes
+
+  $CHANGES
+
+  ## Release Notes
+
+  - Extension artifacts and checksums are attached to the published GitHub Release.
+  - The PostgreSQL 17 container image is published to the repository GHCR package for `postllm`.
+
+categories:
+  - title: Runtime and provider work
+    labels:
+      - runtime
+      - provider
+  - title: SQL and API surface
+    labels:
+      - sql
+      - api
+  - title: Operations and packaging
+    labels:
+      - ops
+      - release
+      - docker
+  - title: Documentation
+    labels:
+      - docs
+  - title: Maintenance
+    labels:
+      - maintenance
+      - refactor
+
+change-template: '- $TITLE (#$NUMBER) @$AUTHOR'
+change-title-escapes: '\<*_&'
+no-changes-template: '- No user-facing changes were labeled for this release.'
+
+version-resolver:
+  major:
+    labels:
+      - major
+  minor:
+    labels:
+      - feature
+      - enhancement
+  patch:
+    labels:
+      - bug
+      - fix
+      - docs
+      - maintenance
+      - release
+  default: patch
+
+autolabeler:
+  - label: docs
+    files:
+      - '*.md'
+      - 'docs/**'
+  - label: release
+    files:
+      - '.github/workflows/release*.yml'
+      - '.github/release-drafter.yml'
+      - 'scripts/package_release_artifact.sh'
+      - 'docker/**'
+  - label: ops
+    files:
+      - 'compose*.yaml'
+      - 'scripts/e2e_*.sh'
+      - 'scripts/bench_*.sh'
+      - 'scripts/benchmark_suite.py'
+  - label: api
+    files:
+      - 'src/api/**'
+      - 'src/lib.rs'
+  - label: runtime
+    files:
+      - 'src/backend.rs'
+      - 'src/candle.rs'
+      - 'src/client.rs'
+      - 'src/execution.rs'
+      - 'src/guc.rs'
+      - 'src/http_policy.rs'
+  - label: maintenance
+    files:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/ci.yml'
