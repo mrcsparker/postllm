@@ -313,8 +313,6 @@ fn caller_has_permission(object_type: PermissionObjectType, target: &str) -> Res
             DatumWithOid::from(WILDCARD_TARGET),
         ],
     )
-    .map(|value| value.unwrap_or(false))
-    .map_err(Into::into)
 }
 
 fn normalize_target(
