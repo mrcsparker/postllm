@@ -7,10 +7,9 @@ use crate::backend::Runtime;
 use crate::enum_parser;
 use crate::error::{Error, Result};
 use crate::operator_policy;
-use pgrx::JsonB;
+use crate::sql;
 use pgrx::datum::DatumWithOid;
 use pgrx::pg_sys;
-use pgrx::spi::Spi;
 use serde_json::Value;
 
 const WILDCARD_TARGET: &str = "*";
@@ -293,13 +292,11 @@ fn permission_scope_active(object_type: PermissionObjectType, target: &str) -> R
         }
     };
 
-    Spi::get_one_with_args::<bool>(sql, &args)
-        .map(|value| value.unwrap_or(false))
-        .map_err(Into::into)
+    sql::bool_or_false(sql, &args)
 }
 
 fn caller_has_permission(object_type: PermissionObjectType, target: &str) -> Result<bool> {
-    Spi::get_one_with_args::<bool>(
+    sql::bool_or_false(
         "SELECT COALESCE(
             bool_or(p.target = $3 OR p.target = $4),
             false
@@ -358,11 +355,10 @@ fn normalize_target(
 
 fn validated_role_name(role_name: &str) -> Result<String> {
     let role_name = require_non_blank("role_name", role_name)?.to_owned();
-    let exists = Spi::get_one_with_args::<bool>(
+    let exists = sql::bool_or_false(
         "SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1)",
         &[DatumWithOid::from(role_name.as_str())],
-    )?
-    .unwrap_or(false);
+    )?;
 
     if exists {
         Ok(role_name)
@@ -390,9 +386,7 @@ fn unknown_permission(role_name: &str, object_type: PermissionObjectType, target
 }
 
 fn json_query(query: &str, args: &[DatumWithOid]) -> Result<Value> {
-    Spi::get_one_with_args::<JsonB>(query, args)
-        .map(|value| value.map_or(Value::Null, |value| value.0))
-        .map_err(Into::into)
+    sql::json_value("permissions", query, args)
 }
 
 fn require_non_blank<'value>(name: &str, value: &'value str) -> Result<&'value str> {

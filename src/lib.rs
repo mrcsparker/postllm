@@ -19,6 +19,7 @@ pub(crate) mod operator_policy;
 pub(crate) mod permissions;
 pub(crate) mod prompts;
 pub(crate) mod secrets;
+pub(crate) mod sql;
 
 use crate::error::{Error, Result};
 use pgrx::JsonB;

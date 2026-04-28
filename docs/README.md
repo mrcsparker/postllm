@@ -13,7 +13,9 @@ This page gives the quickest route to what you need.
 - [operations.md](./operations.md) — Docker, local dev workflows, and smoke tests.
 - [benchmarks.md](./benchmarks.md) — Benchmark suites for latency, throughput, and backend RSS.
 - [architecture.md](./architecture.md) — Internal request flow and ownership map.
+- [contributor-style-guide.md](./contributor-style-guide.md) — Contributor rules for ownership, naming, complexity, errors, comments, and tests.
 - [code-quality-rubric.md](./code-quality-rubric.md) — Release-gate cleanup rubric for naming, comments, module boundaries, and dead code.
+- [professionalization-qa.md](./professionalization-qa.md) — Milestone merge checklist for source quality, behavior, docs, and verification.
 
 ## Reference and advanced usage
 
@@ -41,4 +43,4 @@ This page gives the quickest route to what you need.
 
 - Quick users: keep `getting-started`, `demo`, `runtime`, and `cookbook` open.
 - Integrators: add `configuration`, `reference`, `operations`, and `benchmarks` when performance sizing matters.
-- Contributors: add `architecture`, `code-quality-rubric`, and `reference` for API ownership and cleanup expectations.
+- Contributors: add `architecture`, `contributor-style-guide`, `code-quality-rubric`, `professionalization-qa`, and `reference` for API ownership, cleanup expectations, and milestone merge checks.

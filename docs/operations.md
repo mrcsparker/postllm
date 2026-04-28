@@ -102,9 +102,9 @@ Success is reported explicitly at the end of each run:
 Recommended local checks:
 
 ```bash
-cargo fmt
-cargo test
+cargo fmt --all --check
 env PGRX_HOME=/tmp/postllm-pgrx-home cargo clippy --all-targets --no-default-features --features pg17,pg_test -- -D warnings
+env PGRX_HOME=/tmp/postllm-pgrx-home cargo test --lib --locked --no-default-features --features pg17
 env PGRX_HOME=/tmp/postllm-pgrx-home CARGO_TARGET_DIR=/tmp/postllm-target cargo pgrx test pg17
 ```
 
@@ -114,6 +114,8 @@ GitHub Actions runs the corresponding repository gate in [`.github/workflows/ci.
 - `postgres-compile-matrix` builds the crate across PostgreSQL 13 through 18 on Ubuntu so every advertised feature flag stays live.
 - `postgres-smoke-matrix` runs focused `pg_test` smoke checks on PostgreSQL 16 and 18, with PostgreSQL 17 already covered by `quality`.
 - `os-build-matrix` runs cross-platform build checks on macOS and Windows against PostgreSQL 17 so non-Linux regressions are caught before release.
+
+Contributor review and milestone QA expectations live in [contributor-style-guide.md](./contributor-style-guide.md) and [professionalization-qa.md](./professionalization-qa.md). The pull request template requires those checks before milestone work merges.
 
 The upgrade check is available locally:
 

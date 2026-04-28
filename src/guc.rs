@@ -11,8 +11,6 @@ use crate::audit::AuditConfig;
 use crate::backend::{CandleDevice, Runtime, Settings};
 use crate::error::{Error, Result};
 use crate::permissions;
-use pgrx::datum::DatumWithOid;
-use pgrx::spi::Spi;
 use pgrx::{GucContext, GucFlags, GucRegistry, GucSetting};
 use serde_json::{Map, Value, json};
 use std::ffi::CString;
@@ -1266,12 +1264,7 @@ fn reset_profile_managed_settings_to_defaults() -> Result<()> {
 }
 
 fn set_session_string(name: &str, value: &str) -> Result<()> {
-    drop(Spi::get_one_with_args::<String>(
-        "SELECT set_config($1, $2, false)",
-        &[DatumWithOid::from(name), DatumWithOid::from(value)],
-    )?);
-
-    Ok(())
+    crate::sql::set_session_config(name, value)
 }
 
 fn resolve_generation_model(model_override: Option<&str>) -> Result<String> {

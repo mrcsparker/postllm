@@ -51,6 +51,9 @@ Last manually verified in-repo on 2026-04-05:
 - 2026-04-18 follow-up: `python3 scripts/benchmark_suite.py --suite benchmarks/runtime_matrix.json --dry-run` passed.
 - 2026-04-18 follow-up: `cargo test --lib client::tests::` passed.
 - 2026-04-18 follow-up: `cargo pgrx test pg17 sql_chat_structured_should_support_responses_api_base_url -F pg_test` passed.
+- 2026-04-27 follow-up: targeted `rustfmt --edition 2024 --check` on touched Rust files passed.
+- 2026-04-27 follow-up: `cargo metadata --manifest-path /Users/mrcsparker/Documents/GitHub/postllm/Cargo.toml --no-deps --format-version 1` passed from `/tmp` with the repo macOS linker `RUSTFLAGS`.
+- 2026-04-27 follow-up: full `cargo check`/`cargo test` could not complete locally because the checkout and target cache contained dataless macOS files (`.cargo/config.toml`, `src/api/inference.rs`, and `target/debug/deps/*`) while the disk had roughly 1-2 GiB free; retries failed in dependency rebuilds with `Operation timed out`/`Operation canceled`.
 
 This snapshot confirms the current hosted `llama-server` Docker lane and the local Candle Docker lane are both green. Keep this section current when backlog status is updated so the plan stays anchored to a real checked state instead of a guessed one.
 
@@ -254,11 +257,11 @@ Issues:
 - [x] `PL-077` Move SQL-facing API wrappers into `src/api/` (`config`, `messages`, `inference`, `retrieval`, `ops`) and remove `crate::api_*`-style call sites.
 - [x] `PL-078` Consolidate repetitive enum parse/`Display` patterns (`Runtime`, `CandleDevice`, `ModelAliasLane`, `PermissionObjectType`, retrieval/scoping enums) into helper traits/macros or derive-based implementations to reduce duplicated matching and error text drift; target at least 300 lines deleted and clearer parser ownership.
 - [x] `PL-068` Introduce a single `ExecutionContext` type for request lifecycle (`resolve -> validate -> enforce policy -> call runtime`) to remove duplicated logic in request entrypoints.
-- [ ] `PL-069` Extract shared SQL builder/lookup helpers from `guc`, `permissions`, `secrets`, and `catalog` into a common internal module to avoid duplicated SPI/error path patterns.
+- [x] `PL-069` Extract shared SQL builder/lookup helpers from `guc`, `permissions`, `secrets`, and `catalog` into a common internal module to avoid duplicated SPI/error path patterns.
 - [x] `PL-070` Add a dedicated architecture map for request and permission flows to help future reviewers reason about control flow quickly.
-- [ ] `PL-071` Add a contributor-facing style guide for code ownership, naming, and complexity thresholds, and enforce it on new changes via review and CI.
-- [ ] `PL-072` Add static complexity guardrails (`cyclomatic` and `func_len` checks or clippy config where practical) for new and touched modules.
-- [ ] `PL-073` Add a "Professionalization QA" checklist task list and require passing it before each milestone merges.
+- [x] `PL-071` Add a contributor-facing style guide for code ownership, naming, and complexity thresholds, and enforce it on new changes via review and CI.
+- [x] `PL-072` Add static complexity guardrails (`cyclomatic` and `func_len` checks or clippy config where practical) for new and touched modules.
+- [x] `PL-073` Add a "Professionalization QA" checklist task list and require passing it before each milestone merges.
 - [x] `PL-074` Add a release-blocking README and docs reorganization pass:
   - one-page "quick path" by role (operator, integrator, contributor),
   - decision-first documentation map with explicit where-to-start links,

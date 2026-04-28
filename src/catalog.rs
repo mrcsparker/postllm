@@ -7,9 +7,9 @@ use crate::enum_parser;
 use crate::error::{Error, Result};
 use crate::guc::SessionOverrides;
 use crate::secrets::StoredSecret;
+use crate::sql;
 use pgrx::JsonB;
 use pgrx::datum::DatumWithOid;
-use pgrx::spi::Spi;
 use serde_json::{Value, json};
 
 /// Lane-aware model alias selector.
@@ -42,15 +42,13 @@ pub(crate) fn resolve_model_alias(alias: &str, lane: ModelAliasLane) -> Result<O
         return Ok(None);
     }
 
-    Spi::get_one_with_args::<String>(
+    sql::optional_trimmed_string(
         "SELECT COALESCE(
             (SELECT model FROM postllm.model_aliases WHERE alias = $1 AND lane = $2),
             ''
         )",
         &[DatumWithOid::from(alias), DatumWithOid::from(lane.as_str())],
     )
-    .map(|value| value.and_then(|value| trimmed_or_none(&value).map(str::to_owned)))
-    .map_err(Into::into)
 }
 
 /// Returns all named config profiles as a JSON array.
@@ -445,42 +443,32 @@ fn fetch_secret_record(name: &str) -> Result<Value> {
 }
 
 fn fetch_secret_payload(name: &str) -> Result<StoredSecret> {
-    Spi::connect(|client| {
-        let table = client.select(
-            "SELECT algorithm, nonce, ciphertext, key_fingerprint
-             FROM postllm.provider_secrets
-             WHERE name = $1",
-            None,
-            &[DatumWithOid::from(name)],
-        )?;
-        if table.is_empty() {
-            return Err(unknown_secret("api_key_secret", name));
-        }
-        let row = table.first();
+    let secret = json_query(
+        "SELECT COALESCE(
+            (
+                SELECT jsonb_build_object(
+                    'algorithm', algorithm,
+                    'nonce', nonce,
+                    'ciphertext', ciphertext,
+                    'key_fingerprint', key_fingerprint
+                )
+                FROM postllm.provider_secrets
+                WHERE name = $1
+            ),
+            'null'::jsonb
+        )",
+        &[DatumWithOid::from(name)],
+    )?;
 
-        let algorithm = row.get_by_name::<String, _>("algorithm")?.ok_or_else(|| {
-            Error::Config(format!("stored secret '{name}' is missing its algorithm"))
-        })?;
-        let nonce = row
-            .get_by_name::<String, _>("nonce")?
-            .ok_or_else(|| Error::Config(format!("stored secret '{name}' is missing its nonce")))?;
-        let ciphertext = row.get_by_name::<String, _>("ciphertext")?.ok_or_else(|| {
-            Error::Config(format!("stored secret '{name}' is missing its ciphertext"))
-        })?;
-        let key_fingerprint = row
-            .get_by_name::<String, _>("key_fingerprint")?
-            .ok_or_else(|| {
-                Error::Config(format!(
-                    "stored secret '{name}' is missing its key fingerprint"
-                ))
-            })?;
+    if secret.is_null() {
+        return Err(unknown_secret("api_key_secret", name));
+    }
 
-        Ok(StoredSecret {
-            algorithm,
-            nonce,
-            ciphertext,
-            key_fingerprint,
-        })
+    Ok(StoredSecret {
+        algorithm: required_secret_payload_string(&secret, name, "algorithm")?,
+        nonce: required_secret_payload_string(&secret, name, "nonce")?,
+        ciphertext: required_secret_payload_string(&secret, name, "ciphertext")?,
+        key_fingerprint: required_secret_payload_string(&secret, name, "key_fingerprint")?,
     })
 }
 
@@ -512,9 +500,27 @@ fn fetch_model_alias_record(alias: &str, lane: ModelAliasLane) -> Result<Value> 
 }
 
 fn json_query(query: &str, args: &[DatumWithOid<'_>]) -> Result<Value> {
-    Spi::get_one_with_args::<JsonB>(query, args)?
-        .map(|value| value.0)
-        .ok_or_else(|| Error::Config(format!("catalog query did not return a row: {query}")))
+    sql::json_value("catalog", query, args)
+}
+
+fn required_secret_payload_string(secret: &Value, name: &str, field: &str) -> Result<String> {
+    secret
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            Error::Config(format!(
+                "stored secret '{name}' is missing its {}",
+                secret_payload_label(field)
+            ))
+        })
+}
+
+const fn secret_payload_label(field: &str) -> &str {
+    match field.as_bytes() {
+        b"key_fingerprint" => "key fingerprint",
+        _ => field,
+    }
 }
 
 fn unknown_profile(name: &str) -> Error {
